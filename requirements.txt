@@ -4,3 +4,4 @@ yfinance
 mftool
 plotly
 openpyxl
+deprecated
