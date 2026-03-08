@@ -5,3 +5,4 @@ mftool
 plotly
 openpyxl
 deprecated
+numpy
