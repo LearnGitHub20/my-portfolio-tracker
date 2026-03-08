@@ -12,23 +12,60 @@ mf = Mftool()
 
 # --- BROKER MAPPING & CLEANING ---
 def normalize_indian_stocks(df):
-    """Detects broker and maps columns to standard format."""
+    """Detects broker and maps columns to standard format with debugging."""
+    # Convert column names to lowercase and strip whitespace
     df.columns = [str(c).strip().lower() for c in df.columns]
     
+    # --- DEBUGGING: Uncomment the line below to see your columns in the app ---
+    # st.write("Columns found in file:", df.columns.tolist())
+    
     # Logic for ICICIdirect vs Angel One
-    if 'stock code' in df.columns: # ICICI
+    # We look for unique identifiers in the columns to guess the broker
+    if any('stock' in c or 'cost' in c for c in df.columns): # ICICI
         mapping = {'stock code': 'symbol', 'quantity': 'qty', 'average cost': 'avg_price'}
-        # Simple map for common ICICI codes to NSE symbols
-        icici_map = {'RELIND': 'RELIANCE', 'INFTEC': 'INFY', 'HDFCBA': 'HDFCBANK', 'ICIBAN': 'ICICIBANK'}
         df = df.rename(columns=mapping)
-        df['symbol'] = df['symbol'].apply(lambda x: icici_map.get(x, x))
     else: # Angel or General
-        mapping = {'trading symbol': 'symbol', 'scrip name': 'symbol', 'average price': 'avg_price', 'total qty': 'qty'}
+        # Angel One often uses 'trading symbol' or 'scrip name'
+        # We try to map common Angel variations
+        mapping = {
+            'trading symbol': 'symbol', 
+            'scrip name': 'symbol', 
+            'symbol': 'symbol',
+            'average price': 'avg_price', 
+            'buy price': 'avg_price',
+            'avg. price': 'avg_price',
+            'total qty': 'qty', 
+            'quantity': 'qty'
+        }
         df = df.rename(columns=mapping)
     
-    # Add .NS for Indian Tickers for yfinance compatibility
+    # Ensure we have the required columns, if not, throw an error
+    required = ['symbol', 'qty', 'avg_price']
+    if not all(col in df.columns for col in required):
+        st.error(f"Could not map columns. Found: {df.columns.tolist()}")
+        return pd.DataFrame()
+        
+    # Add .NS for Indian Tickers
     df['symbol'] = df['symbol'].str.upper().apply(lambda x: f"{x}.NS" if not x.endswith(('.NS', '.BO')) else x)
-    return df[['symbol', 'qty', 'avg_price']]
+    return df[required]
+
+# --- Update your Uploader Section ---
+with tab_in:
+    up_in = st.file_uploader("Upload ICICI/Angel CSV/Excel", type=['csv', 'xlsx'])
+    if up_in:
+        try:
+            # Detect file type and read
+            if up_in.name.endswith('.xlsx'):
+                raw_in = pd.read_excel(up_in)
+            else:
+                raw_in = pd.read_csv(up_in)
+                
+            norm_in = normalize_indian_stocks(raw_in)
+            if not norm_in.empty:
+                st.session_state.in_df = merge_holdings(norm_in)
+                st.success("File uploaded successfully!")
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
 
 def merge_holdings(df, symbol_col='symbol'):
     """Merges duplicates and calculates Weighted Average Price."""
