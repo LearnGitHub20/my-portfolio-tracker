@@ -4,129 +4,161 @@ import yfinance as yf
 from mftool import Mftool
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Global Portfolio Tracker")
+# --- INITIALIZATION ---
+st.set_page_config(layout="wide", page_title="Global Wealth Tracker")
 mf = Mftool()
 
-# --- HELPER FUNCTIONS ---
+# --- BROKER MAPPING & CLEANING ---
+def normalize_indian_stocks(df):
+    """Detects broker and maps columns to standard format."""
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    # Logic for ICICIdirect vs Angel One
+    if 'stock code' in df.columns: # ICICI
+        mapping = {'stock code': 'symbol', 'quantity': 'qty', 'average cost': 'avg_price'}
+        # Simple map for common ICICI codes to NSE symbols
+        icici_map = {'RELIND': 'RELIANCE', 'INFTEC': 'INFY', 'HDFCBA': 'HDFCBANK', 'ICIBAN': 'ICICIBANK'}
+        df = df.rename(columns=mapping)
+        df['symbol'] = df['symbol'].apply(lambda x: icici_map.get(x, x))
+    else: # Angel or General
+        mapping = {'trading symbol': 'symbol', 'scrip name': 'symbol', 'average price': 'avg_price', 'total qty': 'qty'}
+        df = df.rename(columns=mapping)
+    
+    # Add .NS for Indian Tickers for yfinance compatibility
+    df['symbol'] = df['symbol'].str.upper().apply(lambda x: f"{x}.NS" if not x.endswith(('.NS', '.BO')) else x)
+    return df[['symbol', 'qty', 'avg_price']]
+
+def merge_holdings(df, symbol_col='symbol'):
+    """Merges duplicates and calculates Weighted Average Price."""
+    if df.empty: return df
+    df['total_cost'] = df['qty'] * df['avg_price']
+    grouped = df.groupby(symbol_col).agg({'qty': 'sum', 'total_cost': 'sum'}).reset_index()
+    grouped['avg_price'] = grouped['total_cost'] / grouped['qty']
+    return grouped
+
+# --- DATA FETCHING ---
+@st.cache_data(ttl=3600)
+def get_live_data(tickers):
+    if not tickers: return {}
+    data = yf.download(tickers, period="2d", interval="1d", progress=False)
+    results = {}
+    for t in tickers:
+        try:
+            current = data['Close'][t].iloc[-1]
+            prev_close = data['Close'][t].iloc[-2]
+            day_change = ((current - prev_close) / prev_close) * 100
+            results[t] = {'price': current, 'change': day_change}
+        except: results[t] = {'price': 0, 'change': 0}
+    return results
+
+@st.cache_data(ttl=3600)
 def get_fx_rates():
-    """Fetch current exchange rates to INR"""
-    rates = {'USD': 1.0, 'GBP': 1.0, 'EUR': 1.0, 'INR': 1.0}
-    for curr in ['USD', 'GBP', 'EUR']:
-        ticker = f"{curr}INR=X"
-        data = yf.Ticker(ticker).fast_info['last_price']
-        rates[curr] = data
+    rates = {'USD': 1.0, 'GBP': 1.0, 'EUR': 1.0}
+    for curr in rates.keys():
+        rates[curr] = yf.Ticker(f"{curr}INR=X").fast_info['last_price']
     return rates
 
-def fetch_stock_data(tickers):
-    """Fetch real-time and historical data for stocks"""
-    if not tickers: return pd.DataFrame()
-    data = yf.download(tickers, period="1y", interval="1d", group_by='ticker', progress=False)
-    return data
+# --- MAIN UI ---
+st.title("💼 Universal Portfolio Manager")
+st.markdown("---")
 
-# --- UI LAYOUT ---
-st.title("📈 Global Multi-Asset Portfolio Dashboard")
-tabs = st.tabs(["Summary & Analytics", "India Stocks", "India Mutual Funds", "International Stocks"])
+tab_sum, tab_in, tab_mf, tab_gl = st.tabs(["Summary", "India Stocks", "India MFs", "Global Stocks"])
 
-# Persistent State for Data
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = {
-        'in_stocks': pd.DataFrame(columns=['Ticker', 'Qty', 'Avg Price']),
-        'in_mf': pd.DataFrame(columns=['Scheme Code', 'Units', 'Avg NAV']),
-        'global_stocks': pd.DataFrame(columns=['Ticker', 'Qty', 'Avg Price', 'Currency'])
-    }
+# Persistent State
+for key in ['in_df', 'mf_df', 'gl_df']:
+    if key not in st.session_state: st.session_state[key] = pd.DataFrame()
 
-# --- SECTION 1: India Stocks ---
-with tabs[1]:
-    st.subheader("🇮🇳 Indian Equity Holdings")
-    uploaded_file = st.file_uploader("Upload Indian Stocks CSV (Ticker, Qty, Avg Price)", key="in_stocks_up")
-    if uploaded_file:
-        st.session_state.portfolio['in_stocks'] = pd.read_csv(uploaded_file)
-    
-    df_in = st.session_state.portfolio['in_stocks']
-    if not df_in.empty:
-        # Add .NS for Yahoo Finance if not present
-        tickers = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in df_in['Ticker']]
-        prices = yf.download(tickers, period="1d")['Close'].iloc[-1]
-        df_in['Current Price'] = df_in['Ticker'].apply(lambda x: prices[x+".NS"] if x+".NS" in prices else 0)
-        df_in['Total Value'] = df_in['Qty'] * df_in['Current Price']
-        df_in['Gain/Loss %'] = ((df_in['Current Price'] - df_in['Avg Price']) / df_in['Avg Price']) * 100
-        st.dataframe(df_in.style.format(precision=2))
+# --- SECTION: INDIA STOCKS ---
+with tab_in:
+    up_in = st.file_uploader("Upload ICICI/Angel CSV", type=['csv', 'xlsx'])
+    if up_in:
+        raw_in = pd.read_csv(up_in) if up_in.name.endswith('.csv') else pd.read_excel(up_in)
+        norm_in = normalize_indian_stocks(raw_in)
+        st.session_state.in_df = merge_holdings(norm_in)
 
-# --- SECTION 2: India Mutual Funds ---
-with tabs[2]:
-    st.subheader("🏦 Indian Mutual Funds")
-    uploaded_mf = st.file_uploader("Upload MF CSV (Scheme Code, Units, Avg NAV)", key="mf_up")
-    if uploaded_mf:
-        st.session_state.portfolio['in_mf'] = pd.read_csv(uploaded_mf)
-    
-    df_mf = st.session_state.portfolio['in_mf']
-    if not df_mf.empty:
-        # Fetch latest NAVs via mftool
-        navs = []
-        for code in df_mf['Scheme Code']:
-            try:
-                d = mf.get_scheme_quote(str(code))
-                navs.append(float(d['nav']))
-            except: navs.append(0)
-        df_mf['Current NAV'] = navs
-        df_mf['Total Value'] = df_mf['Units'] * df_mf['Current NAV']
-        df_mf['Gain/Loss %'] = ((df_mf['Current NAV'] - df_mf['Avg NAV']) / df_mf['Avg NAV']) * 100
-        st.dataframe(df_mf.style.format(precision=2))
+    if not st.session_state.in_df.empty:
+        df = st.session_state.in_df
+        live = get_live_data(df['symbol'].tolist())
+        df['current_price'] = df['symbol'].map(lambda x: live.get(x, {}).get('price', 0))
+        df['today_gain_%'] = df['symbol'].map(lambda x: live.get(x, {}).get('change', 0))
+        df['total_value'] = df['qty'] * df['current_price']
+        df['overall_gain_%'] = ((df['current_price'] - df['avg_price']) / df['avg_price']) * 100
+        st.dataframe(df.style.format(precision=2), use_container_width=True)
 
-# --- SECTION 3: International Stocks ---
-with tabs[3]:
-    st.subheader("🌎 International Equity (US, UK, Europe)")
-    uploaded_global = st.file_uploader("Upload Global Stocks CSV (Ticker, Qty, Avg Price, Currency)", key="global_up")
-    if uploaded_global:
-        st.session_state.portfolio['global_stocks'] = pd.read_csv(uploaded_global)
-    
-    df_gl = st.session_state.portfolio['global_stocks']
-    if not df_gl.empty:
-        gl_tickers = df_gl['Ticker'].tolist()
-        gl_prices = yf.download(gl_tickers, period="1d")['Close'].iloc[-1]
-        df_gl['Current Price'] = df_gl['Ticker'].apply(lambda x: gl_prices[x] if x in gl_prices else 0)
-        df_gl['Total Value (Local)'] = df_gl['Qty'] * df_gl['Current Price']
-        st.dataframe(df_gl.style.format(precision=2))
+# --- SECTION: MUTUAL FUNDS ---
+with tab_mf:
+    up_mf = st.file_uploader("Upload MF CSV (Scheme Code, Units, Avg NAV)", type=['csv'])
+    if up_mf:
+        raw_mf = pd.read_csv(up_mf)
+        raw_mf.columns = ['symbol', 'qty', 'avg_price'] # Standardize internal names
+        st.session_state.mf_df = merge_holdings(raw_mf)
 
-# --- SUMMARY TAB & ANALYTICS ---
-with tabs[0]:
+    if not st.session_state.mf_df.empty:
+        df = st.session_state.mf_df
+        # Fetch NAVs
+        nav_list = []
+        for code in df['symbol']:
+            try: nav_list.append(float(mf.get_scheme_quote(str(code))['nav']))
+            except: nav_list.append(0)
+        df['current_price'] = nav_list
+        df['total_value'] = df['qty'] * df['current_price']
+        df['overall_gain_%'] = ((df['current_price'] - df['avg_price']) / df['avg_price']) * 100
+        st.dataframe(df.style.format(precision=2), use_container_width=True)
+
+# --- SECTION: GLOBAL STOCKS ---
+with tab_gl:
+    up_gl = st.file_uploader("Upload Global CSV (Ticker, Qty, Avg Price, Currency)", type=['csv'])
+    if up_gl:
+        raw_gl = pd.read_csv(up_gl)
+        raw_gl.columns = ['symbol', 'qty', 'avg_price', 'currency']
+        st.session_state.gl_df = merge_holdings(raw_gl)
+
+    if not st.session_state.gl_df.empty:
+        df = st.session_state.gl_df
+        live_gl = get_live_data(df['symbol'].tolist())
+        df['current_price'] = df['symbol'].map(lambda x: live_gl.get(x, {}).get('price', 0))
+        df['total_value_local'] = df['qty'] * df['current_price']
+        st.dataframe(df.style.format(precision=2), use_container_width=True)
+
+# --- SUMMARY & ANALYTICS ---
+with tab_sum:
     fx = get_fx_rates()
+    in_val = st.session_state.in_df['total_value'].sum() if not st.session_state.in_df.empty else 0
+    mf_val = st.session_state.mf_df['total_value'].sum() if not st.session_state.mf_df.empty else 0
     
-    # Calculate Total Portfolio Value in INR
-    val_in_stocks = df_in['Total Value'].sum() if not df_in.empty else 0
-    val_in_mf = df_mf['Total Value'].sum() if not df_mf.empty else 0
-    
-    val_global = 0
-    if not df_gl.empty:
-        df_gl['Total Value (INR)'] = df_gl.apply(lambda x: x['Total Value (Local)'] * fx.get(x['Currency'], 1), axis=1)
-        val_global = df_gl['Total Value (INR)'].sum()
-    
-    total_portfolio = val_in_stocks + val_in_mf + val_global
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Portfolio (INR)", f"₹{total_portfolio:,.2f}")
-    col2.metric("India Exposure", f"{( (val_in_stocks + val_in_mf)/total_portfolio * 100 if total_portfolio > 0 else 0):.1f}%")
-    col3.metric("Global Exposure", f"{(val_global/total_portfolio * 100 if total_portfolio > 0 else 0):.1f}%")
+    gl_val = 0
+    if not st.session_state.gl_df.empty:
+        df_gl = st.session_state.gl_df
+        df_gl['total_value_inr'] = df_gl.apply(lambda x: x['total_value_local'] * fx.get(x['currency'], 1), axis=1)
+        gl_val = df_gl['total_value_inr'].sum()
 
-    # Visuals
-    st.divider()
-    c1, c2 = st.columns(2)
+    total_portfolio = in_val + mf_val + gl_val
     
-    with c1:
-        st.write("### Asset Allocation")
-        fig = px.pie(values=[val_in_stocks, val_in_mf, val_global], 
-                     names=['India Stocks', 'India MF', 'Global Stocks'],
-                     hole=0.5, color_discrete_sequence=px.colors.sequential.RdBu)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with c2:
-        st.write("### Portfolio vs Benchmarks (1Y)")
-        # This is a simplified comparison logic
-        benchmarks = yf.download(['^NSEI', '^GSPC'], period="1y")['Close']
-        benchmarks = benchmarks / benchmarks.iloc[0] # Normalize
-        st.line_chart(benchmarks)
+    if total_portfolio > 0:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Net Worth (INR)", f"₹{total_portfolio:,.0f}")
+        c2.metric("Total Stocks", f"₹{(in_val + gl_val):,.0f}")
+        c3.metric("Total MFs", f"₹{mf_val:,.0f}")
 
-st.sidebar.info("Tip: For UK stocks, use .L (e.g., TSCO.L). For Germany, use .DE (e.g., SAP.DE).")
+        # Analytics
+        st.divider()
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.subheader("Asset Allocation")
+            fig = px.pie(values=[in_val, mf_val, gl_val], 
+                         names=['Indian Stocks', 'Mutual Funds', 'Global Stocks'], hole=0.6)
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with col_right:
+            st.subheader("Portfolio Weighting")
+            # Combine all for weight analysis
+            weights = pd.concat([st.session_state.in_df[['symbol', 'total_value']], 
+                                 st.session_state.mf_df[['symbol', 'total_value']]])
+            fig_bar = px.bar(weights.sort_values('total_value', ascending=False).head(10), 
+                             x='symbol', y='total_value', color='symbol')
+            st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.info("Upload your holdings in the tabs above to see the summary.")
