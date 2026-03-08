@@ -1,24 +1,23 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from mftool import Mftool
 import plotly.express as px
 
-# --- INITIALIZATION ---
+# --- CONFIG ---
 st.set_page_config(layout="wide", page_title="Universal Portfolio")
-mf = Mftool()
+
+# Initialize session state for the portfolio if it doesn't exist
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = pd.DataFrame()
 
 def clean_and_map_broker(df):
-    """Fuzzy match columns for Angel, ICICI, and Global."""
-    # Standardize column names: stringify, strip, and lowercase
-    original_cols = df.columns.tolist()
+    """Fuzzy match columns and normalize data."""
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    # Matching keywords - ADDED 'price' HERE
     col_map = {}
     patterns = {
         'symbol': ['symbol', 'trading symbol', 'stock code', 'scrip', 'ticker'],
-        'qty': ['qty', 'quantity', 'total qty', 'demat allocation', 'units'],
+        'qty': ['qty', 'quantity', 'total qty', 'units'],
         'avg_price': ['avg. price', 'average price', 'average cost', 'buy price', 'price', 'cost']
     }
     
@@ -30,85 +29,83 @@ def clean_and_map_broker(df):
     
     df = df.rename(columns=col_map)
     
-    # Check for missing columns and show debug info if failing
-    required = ['symbol', 'qty', 'avg_price']
-    found = [col for col in required if col in df.columns]
-    
-    if len(found) < 3:
-        st.error(f"Mapping Failed! Found: {found}. Expected: {required}")
-        st.write("Headers detected in your file:", original_cols)
+    if not all(k in df.columns for k in ['symbol', 'qty', 'avg_price']):
         return pd.DataFrame()
 
-    # Numeric cleanup (removes commas or currency symbols)
+    # Clean numbers (remove ₹, commas, etc.)
     for col in ['qty', 'avg_price']:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace('[^0-9.]', '', regex=True), errors='coerce')
     
-    # Symbol cleanup
+    # Normalize Symbols
     df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
-    # Add .NS only if no suffix exists
     df['symbol'] = df['symbol'].apply(lambda x: x + ".NS" if "." not in x else x)
     
-    return df[required].dropna()
-
-def merge_holdings(df):
-    df['total_cost'] = df['qty'] * df['avg_price']
-    grouped = df.groupby('symbol').agg({'qty': 'sum', 'total_cost': 'sum'}).reset_index()
-    grouped['avg_price'] = grouped['total_cost'] / grouped['qty']
-    return grouped[['symbol', 'qty', 'avg_price']]
+    return df[['symbol', 'qty', 'avg_price']].dropna()
 
 # --- APP LAYOUT ---
 st.title("💼 Global Multi-Asset Tracker")
-tabs = st.tabs(["📊 Dashboard", "📤 Upload Holdings"])
 
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame()
+# We define the tabs
+tab_dash, tab_upload = st.tabs(["📊 Dashboard", "📤 Upload Holdings"])
 
-# TAB: UPLOAD
-with tabs[1]:
+# --- TAB: UPLOAD ---
+with tab_upload:
     st.header("Upload Statements")
-    file = st.file_uploader("Upload Angel One, ICICI, or Global CSV/Excel", type=['csv', 'xlsx'])
+    file = st.file_uploader("Upload CSV or Excel", type=['csv', 'xlsx'])
     
     if file:
-        try:
-            # Handle both CSV and Excel
-            if file.name.endswith('csv'):
-                raw_df = pd.read_csv(file)
-            else:
-                raw_df = pd.read_excel(file)
-                
-            cleaned_df = clean_and_map_broker(raw_df)
+        raw_df = pd.read_csv(file) if file.name.endswith('csv') else pd.read_excel(file)
+        cleaned = clean_and_map_broker(raw_df)
+        
+        if not cleaned.empty:
+            # Merge Duplicates (Sum Qty, Weighted Avg Price)
+            cleaned['total_cost'] = cleaned['qty'] * cleaned['avg_price']
+            final = cleaned.groupby('symbol').agg({'qty': 'sum', 'total_cost': 'sum'}).reset_index()
+            final['avg_price'] = final['total_cost'] / final['qty']
             
-            if not cleaned_df.empty:
-                st.session_state.portfolio = merge_holdings(cleaned_df)
-                st.success(f"Successfully loaded {len(st.session_state.portfolio)} assets.")
-                st.dataframe(st.session_state.portfolio.head())
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
+            # CRITICAL: Save to session state
+            st.session_state.portfolio = final[['symbol', 'qty', 'avg_price']]
+            st.success("✅ Portfolio successfully saved to session!")
+            
+            # Show a preview so you KNOW it's there
+            st.subheader("Data Preview")
+            st.dataframe(st.session_state.portfolio)
+        else:
+            st.error("❌ Could not detect columns. Check your headers.")
 
-# TAB: DASHBOARD
-with tabs[0]:
+# --- TAB: DASHBOARD ---
+with tab_dash:
+    # Check if session state actually has data
     if st.session_state.portfolio.empty:
-        st.info("Upload a file in the 'Upload' tab to start.")
+        st.warning("⚠️ No data found. Please go to the 'Upload' tab and upload your file first.")
     else:
         df = st.session_state.portfolio.copy()
         
         with st.spinner("Fetching Live Prices..."):
             tickers = df['symbol'].tolist()
-            # Fetching 2 days to calculate 'Today's Change'
-            data = yf.download(tickers, period="2d", interval="1d", progress=False)['Close']
-            
-            if len(tickers) == 1:
-                df['live_price'] = data.iloc[-1]
-                df['prev_close'] = data.iloc[-2]
-            else:
-                df['live_price'] = df['symbol'].map(lambda x: data[x].iloc[-1])
-                df['prev_close'] = df['symbol'].map(lambda x: data[x].iloc[-2])
+            # Fetch prices
+            try:
+                live_data = yf.download(tickers, period="1d", progress=False)['Close']
+                if len(tickers) == 1:
+                    df['live_price'] = live_data.iloc[-1]
+                else:
+                    df['live_price'] = df['symbol'].map(lambda x: live_data[x].iloc[-1])
+            except:
+                st.error("Failed to fetch live prices. Using purchase price.")
+                df['live_price'] = df['avg_price']
 
-        # Calculations
+        # Analysis
         df['current_value'] = df['qty'] * df['live_price']
-        df['total_gain_%'] = ((df['live_price'] - df['avg_price']) / df['avg_price']) * 100
-        df['today_gain_%'] = ((df['live_price'] - df['prev_close']) / df['prev_close']) * 100
-        df['weight_%'] = (df['current_value'] / df['current_value'].sum()) * 100
-
-        # Metrics
-        c1, c2, c3 = st.columns(3)
+        df['gain_loss'] = ((df['live_price'] - df['avg_price']) / df['avg_price']) * 100
+        
+        # Display Metrics
+        c1, c2 = st.columns(2)
+        c1.metric("Total Portfolio Value", f"₹{df['current_value'].sum():,.2f}")
+        c2.metric("Portfolio Return", f"{df['gain_loss'].mean():.2f}%")
+        
+        st.divider()
+        st.dataframe(df.style.format(precision=2), use_container_width=True)
+        
+        # Allocation Chart
+        fig = px.pie(df, values='current_value', names='symbol', hole=0.4, title="Asset Allocation")
+        st.plotly_chart(fig, use_container_width=True)
