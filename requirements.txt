@@ -3,3 +3,4 @@ pandas
 yfinance
 mftool
 plotly
+openpyxl
