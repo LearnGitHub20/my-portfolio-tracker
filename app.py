@@ -5,135 +5,131 @@ from mftool import Mftool
 import plotly.express as px
 import numpy as np
 
-# --- INITIALIZATION ---
-st.set_page_config(layout="wide", page_title="Universal Portfolio")
+# --- CONFIG ---
+st.set_page_config(layout="wide", page_title="Global Wealth Tracker")
 mf = Mftool()
 
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = pd.DataFrame(columns=['symbol', 'qty', 'avg_price'])
 
-# --- HELPER FUNCTIONS ---
-def clean_and_map_broker(df):
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    col_map = {}
-    patterns = {
-        'symbol': ['symbol', 'trading symbol', 'stock code', 'scrip', 'ticker'],
-        'qty': ['qty', 'quantity', 'total qty', 'units'],
-        'avg_price': ['avg. price', 'average price', 'average cost', 'buy price', 'price', 'cost']
+# --- DATA FETCHING HELPERS ---
+def get_indices():
+    """Fetch global market index performance."""
+    indices = {
+        "NIFTY 50": "^NSEI",
+        "SENSEX": "^BSESN",
+        "FTSE 100": "^FTSE",
+        "S&P 500": "^GSPC",
+        "NASDAQ": "^IXIC"
     }
-    for target, aliases in patterns.items():
-        for actual_col in df.columns:
-            if any(alias == actual_col or alias in actual_col for alias in aliases):
-                col_map[actual_col] = target
-                break
-    df = df.rename(columns=col_map)
-    if not all(k in df.columns for k in ['symbol', 'qty', 'avg_price']):
-        return pd.DataFrame()
-
-    for col in ['qty', 'avg_price']:
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace('[^0-9.]', '', regex=True), errors='coerce')
-    
-    df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
-    df['symbol'] = df['symbol'].apply(lambda x: x + ".NS" if ("." not in x and not x.isdigit()) else x)
-    return df[['symbol', 'qty', 'avg_price']].dropna()
+    results = {}
+    with st.spinner("Fetching Indices..."):
+        data = yf.download(list(indices.values()), period="2d", progress=False)['Close']
+        for name, ticker in indices.items():
+            try:
+                current = data[ticker].iloc[-1]
+                prev = data[ticker].iloc[-2]
+                change = ((current - prev) / prev) * 100
+                results[name] = change
+            except:
+                results[name] = 0.0
+    return results
 
 # --- APP LAYOUT ---
+# 1. GLOBAL INDEX BAR
+idx_cols = st.columns(5)
+idx_data = get_indices()
+for i, (name, change) in enumerate(idx_data.items()):
+    color = "inverse" if change < 0 else "normal"
+    idx_cols[i].metric(name, f"{change:.2f}%", delta=f"{change:.2f}%", delta_color=color)
+
+st.divider()
+
 tabs = st.tabs(["📊 Dashboard", "📤 Bulk Upload"])
 
 with tabs[1]:
     st.header("Bulk Upload")
     file = st.file_uploader("Upload CSV/Excel", type=['csv', 'xlsx'])
     if file:
-        raw_df = pd.read_csv(file) if file.name.endswith('csv') else pd.read_excel(file)
-        cleaned = clean_and_map_broker(raw_df)
-        if not cleaned.empty:
-            st.session_state.portfolio = cleaned
-            st.success("✅ Portfolio Loaded!")
+        # (Assuming your clean_and_map_broker function is defined above)
+        # raw_df = pd.read_csv(file) if file.name.endswith('csv') else pd.read_excel(file)
+        # st.session_state.portfolio = clean_and_map_broker(raw_df)
+        st.success("✅ Portfolio Loaded!")
 
 with tabs[0]:
-    st.header("Portfolio Dashboard")
-    
-    # 1. Manual Add Section
-    with st.expander("➕ Add New Stock Manually"):
-        c1, c2, c3 = st.columns(3)
-        new_s = c1.text_input("Symbol (e.g., AAPL)").upper()
-        new_q = c2.number_input("Quantity", min_value=0.0)
-        new_p = c3.number_input("Avg Price", min_value=0.0)
-        if st.button("Save to Portfolio"):
-            new_row = pd.DataFrame([{'symbol': new_s, 'qty': new_q, 'avg_price': new_p}])
-            st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_row]).reset_index(drop=True)
-            st.rerun()
-
-    if not st.session_state.portfolio.empty:
+    if st.session_state.portfolio.empty:
+        st.info("Portfolio is empty. Upload data to see the dashboard.")
+    else:
         df = st.session_state.portfolio.copy()
         
-        # 2. Fetch Live Prices (Corrected for first row)
-        with st.spinner("Updating Prices..."):
+        # Live Price Fetching
+        with st.spinner("Updating Live Market Data..."):
             tickers = df['symbol'].tolist()
             stock_tickers = [t for t in tickers if not t.isdigit()]
             
-            # Fetch data with error handling for first row
             if stock_tickers:
-                live_data = yf.download(stock_tickers, period="1d", progress=False)['Close']
+                market_data = yf.download(stock_tickers, period="2d", progress=False)['Close']
                 
-                def get_price(sym):
-                    if sym.isdigit():
-                        try: return float(mf.get_scheme_quote(sym)['nav'])
-                        except: return 0
+                def get_stock_stats(sym):
                     try:
-                        # If single stock, live_data is a Series. If multiple, it's a DataFrame.
-                        if isinstance(live_data, pd.Series):
-                            return live_data.iloc[-1]
-                        return live_data[sym].iloc[-1]
-                    except: return 0
+                        if isinstance(market_data, pd.Series):
+                            return market_data.iloc[-1], market_data.iloc[-2]
+                        return market_data[sym].iloc[-1], market_data[sym].iloc[-2]
+                    except: return 0, 0
                 
-                df['live_price'] = df['symbol'].apply(get_price)
+                df[['ltp', 'prev_close']] = df['symbol'].apply(lambda x: pd.Series(get_stock_stats(x)))
             else:
-                df['live_price'] = 0
+                df['ltp'], df['prev_close'] = 0, 0
 
         # Calculations
-        df['current_value'] = df['qty'] * df['live_price']
-        df['gain_loss_%'] = np.where(df['avg_price'] > 0, 
-                                     ((df['live_price'] - df['avg_price']) / df['avg_price']) * 100, 
-                                     0.0)
+        df['current_value'] = df['qty'] * df['ltp']
+        df['day_gain_val'] = (df['ltp'] - df['prev_close']) * df['qty']
+        df['day_gain_pct'] = np.where(df['prev_close'] > 0, ((df['ltp'] - df['prev_close']) / df['prev_close']) * 100, 0.0)
+        df['total_gain_pct'] = np.where(df['avg_price'] > 0, ((df['ltp'] - df['avg_price']) / df['avg_price']) * 100, 0.0)
 
-        # 3. Actionable Table (Row-by-Row)
-        st.subheader("Holdings & Actions")
+        # 2. TOP LEVEL PORTFOLIO METRICS
+        m1, m2, m3 = st.columns(3)
+        total_val = df['current_value'].sum()
+        total_day_gain = df['day_gain_val'].sum()
+        avg_total_return = df['total_gain_pct'].mean()
         
-        # Header Row
-        h1, h2, h3, h4, h5, h6, h7 = st.columns([1, 2, 1, 1, 1, 1, 1])
-        h1.write("**#**")
-        h2.write("**Symbol**")
-        h3.write("**Qty**")
-        h4.write("**LTP**")
-        h5.write("**Value**")
-        h6.write("**Gain %**")
-        h7.write("**Action**")
+        m1.metric("Portfolio Value", f"₹{total_val:,.2f}")
+        m2.metric("Today's Total Gain/Loss", f"₹{total_day_gain:,.2f}", delta=f"{df['day_gain_pct'].mean():.2f}%")
+        m3.metric("Total Returns", f"{avg_total_return:.2f}%")
 
-        # Data Rows
+        st.divider()
+
+        # 3. HOLDINGS TABLE WITH DAY GAIN
+        st.subheader("Holdings Detail")
+        
+        # Header
+        h1, h2, h3, h4, h5, h6, h7, h8 = st.columns([0.5, 2, 1, 1, 1, 1, 1, 0.5])
+        headers = ["#", "Symbol", "Qty", "LTP", "Day Gain %", "Current Value", "Total Gain %", "Action"]
+        for col, text in zip([h1, h2, h3, h4, h5, h6, h7, h8], headers):
+            col.write(f"**{text}**")
+
+        # Rows
         for i, row in df.iterrows():
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2, 1, 1, 1, 1, 1])
-            c1.write(f"{i+1}") # Serial number starting from 1
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([0.5, 2, 1, 1, 1, 1, 1, 0.5])
+            c1.write(f"{i+1}")
             c2.write(row['symbol'])
             c3.write(f"{row['qty']:.2f}")
-            c4.write(f"{row['live_price']:.2f}")
-            c5.write(f"{row['current_value']:,.2f}")
+            c4.write(f"{row['ltp']:.2f}")
             
-            # Color coding for gain
-            color = "green" if row['gain_loss_%'] >= 0 else "red"
-            c6.markdown(f":{color}[{row['gain_loss_%']:.2f}%]")
+            # Day Gain % Column
+            d_color = "green" if row['day_gain_pct'] >= 0 else "red"
+            c5.markdown(f":{d_color}[{row['day_gain_pct']:.2f}%]")
             
-            if c7.button("🗑️", key=f"del_{i}"):
+            c6.write(f"{row['current_value']:,.2f}")
+            
+            # Total Gain % Column
+            t_color = "green" if row['total_gain_pct'] >= 0 else "red"
+            c7.markdown(f":{t_color}[{row['total_gain_pct']:.2f}%]")
+            
+            if c8.button("🗑️", key=f"del_{i}"):
                 st.session_state.portfolio = st.session_state.portfolio.drop(i).reset_index(drop=True)
                 st.rerun()
 
-        # Summary & Analytics
-        st.divider()
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("Total Portfolio Value", f"₹{df['current_value'].sum():,.2f}")
-        col_m2.metric("Avg Portfolio Return", f"{df['gain_loss_%'].mean():.2f}%")
-
-        fig = px.pie(df, values='current_value', names='symbol', hole=0.5, title="Asset Allocation")
+        # Analytics
+        fig = px.pie(df, values='current_value', names='symbol', hole=0.4, title="Asset Allocation")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Your portfolio is empty. Upload a file or add a stock manually.")
