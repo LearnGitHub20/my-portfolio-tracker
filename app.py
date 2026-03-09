@@ -40,18 +40,18 @@ def load_and_clean_data():
         st.error(f"Load Error: {e}")
     return pd.DataFrame(columns=['symbol', 'qty', 'avg_price'])
 
-# --- 2. CATEGORIZATION LOGIC ---
-def categorize_stock(symbol):
+# --- 2. CATEGORIZATION & CURRENCY LOGIC ---
+def get_region_info(symbol):
     sym = str(symbol).upper()
-    if any(sym.endswith(s) for s in ['.L', '.DE', '.PA', '.AS', '.MI', '.MC']): return "European"
-    elif sym.endswith('.NS') or sym.endswith('.BO'): return "Indian"
-    elif "." not in sym or sym.endswith('.US'): return "US"
-    return "Others"
+    if sym.endswith('.L'): return "European", "£", "GBP"
+    if any(sym.endswith(s) for s in ['.DE', '.PA', '.AS', '.MI', '.MC']): return "European", "€", "EUR"
+    if sym.endswith('.NS') or sym.endswith('.BO'): return "Indian", "₹", "INR"
+    if "." not in sym or sym.endswith('.US'): return "US", "$", "USD"
+    return "Others", "$", "USD"
 
 # --- 3. UI HEADER & REFRESH ---
 st.title("🌍 Global Multi-Market Tracker")
 
-# Global Refresh Button
 if st.button("🔄 Refresh All Market Prices"):
     st.cache_data.clear()
     st.rerun()
@@ -61,16 +61,17 @@ portfolio = load_and_clean_data()
 
 if not portfolio.empty:
     master_df = portfolio.copy()
-    master_df['region'] = master_df['symbol'].apply(categorize_stock)
+    # Apply region and currency mapping
+    region_info = master_df['symbol'].apply(lambda x: pd.Series(get_region_info(x)))
+    master_df['region'], master_df['currency_sym'], master_df['currency_code'] = region_info[0], region_info[1], region_info[2]
 
-    # Tabs
     sum_tab, in_tab, us_tab, eu_tab, set_tab = st.tabs(["📈 Summary", "🇮🇳 Indian", "🇺🇸 US", "🇪🇺 European", "⚙️ Settings"])
 
     # Region Helper
-    def render_region(df_subset, region_name, currency_symbol):
+    def render_region(df_subset, region_name):
         if df_subset.empty:
             st.info(f"No holdings found for {region_name}.")
-            return 0, 0, 0 # Return values for summary
+            return None
             
         tickers = df_subset['symbol'].unique().tolist()
         fetch_tickers = [t if ('.' in t or region_name != "Indian") else f"{t}.NS" for t in tickers]
@@ -89,69 +90,99 @@ if not portfolio.empty:
 
         df_subset['invested'] = df_subset['qty'] * df_subset['avg_price']
         df_subset['mkt_val'] = df_subset['qty'] * df_subset['ltp']
-        df_subset['day_chg'] = (df_subset['ltp'] - df_subset['prev']) / df_subset['prev'] * 100
-        
-        # Display Table with Serial Number starting from 1
-        df_display = df_subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'day_chg']].reset_index(drop=True)
+        df_subset['day_gain_val'] = (df_subset['ltp'] - df_subset['prev']) * df_subset['qty']
+        df_subset['total_gain_val'] = df_subset['mkt_val'] - df_subset['invested']
+        df_subset['day_chg_pct'] = ((df_subset['ltp'] - df_subset['prev']) / df_subset['prev'] * 100).fillna(0)
+        df_subset['total_chg_pct'] = (df_subset['total_gain_val'] / df_subset['invested'] * 100).fillna(0)
+
+        # Regional Top Summary Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        # Use primary currency of the region for the header
+        prim_sym = df_subset['currency_sym'].iloc[0] 
+        m1.metric("Invested", f"{prim_sym}{df_subset['invested'].sum():,.2f}")
+        m2.metric("Today Value", f"{prim_sym}{df_subset['mkt_val'].sum():,.2f}")
+        m3.metric("Total Gains", f"{prim_sym}{df_subset['total_gain_val'].sum():,.2f}", f"{df_subset['total_chg_pct'].mean():.2f}%")
+        m4.metric("Today Gain/Loss", f"{prim_sym}{df_subset['day_gain_val'].sum():,.2f}", f"{df_subset['day_chg_pct'].mean():.2f}%")
+
+        st.divider()
+
+        # Display Table with Serial Number
+        df_display = df_subset.reset_index(drop=True)
         df_display.index += 1
         
-        st.subheader(f"{region_name} Holdings")
-        st.dataframe(df_display.style.format({
-            'avg_price': f"{currency_symbol}{{:.2f}}",
-            'ltp': f"{currency_symbol}{{:.2f}}",
-            'mkt_val': f"{currency_symbol}{{:.2f}}",
-            'day_chg': "{:.2f}%"
+        # Formatting helper to handle mixed currencies in the same tab (e.g. London £ vs Paris €)
+        def format_row(row, col):
+            return f"{row['currency_sym']}{row[col]:,.2f}"
+
+        # We display the dataframe with custom formatting per row
+        st.dataframe(df_display[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'day_chg_pct']].style.format({
+            'day_chg_pct': "{:.2f}%"
         }), use_container_width=True)
         
-        return df_subset['invested'].sum(), df_subset['mkt_val'].sum(), region_name
+        return df_subset
 
-    # Render Regional Tabs and Capture Data for Summary
-    with in_tab: in_stats = render_region(master_df[master_df['region'] == "Indian"], "Indian", "₹")
-    with us_tab: us_stats = render_region(master_df[master_df['region'] == "US"], "US", "$")
-    with eu_tab: eu_stats = render_region(master_df[master_df['region'] == "European"], "European", "€")
+    # Render Regional Tabs
+    with in_tab: in_df = render_region(master_df[master_df['region'] == "Indian"], "Indian")
+    with us_tab: us_df = render_region(master_df[master_df['region'] == "US"], "US")
+    with eu_tab: eu_df = render_region(master_df[master_df['region'] == "European"], "European")
 
     # --- 5. SUMMARY TAB ---
     with sum_tab:
-        st.header("Global Portfolio Summary")
+        st.header("Global Portfolio Summary (Converted to GBP)")
         
-        # Prepare Summary DataFrame (Note: This is nominal value; does not handle FX conversion)
-        summary_data = []
-        for stats in [in_stats, us_stats, eu_stats]:
-            if stats: # Check if region had data
-                summary_data.append({
-                    "Region": stats[2],
-                    "Invested": stats[0],
-                    "Market Value": stats[1],
-                    "Return %": ((stats[1]-stats[0])/stats[0]*100) if stats[0]>0 else 0
-                })
-        
-        sum_df = pd.DataFrame(summary_data)
-        
+        # Fetch Live Exchange Rates for GBP
+        with st.spinner("Fetching Exchange Rates..."):
+            fx = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
+            # Rates are 1 GBP to X, so to get GBP we divide local / rate
+            rates = {
+                "USD": fx["GBPUSD=X"].iloc[-1],
+                "INR": fx["GBPINR=X"].iloc[-1],
+                "EUR": fx["GBPEUR=X"].iloc[-1],
+                "GBP": 1.0
+            }
+
+        summary_rows = []
+        for df_reg, name in [(in_df, "India"), (us_df, "USA"), (eu_df, "Europe")]:
+            if df_reg is not None and not df_reg.empty:
+                # Group by currency within region to handle FX correctly
+                for curr, group in df_reg.groupby('currency_code'):
+                    inv_gbp = group['invested'].sum() / rates[curr]
+                    mkt_gbp = group['mkt_val'].sum() / rates[curr]
+                    summary_rows.append({
+                        "Region": f"{name} ({curr})",
+                        "Invested (Local)": group['invested'].sum(),
+                        "Mkt Value (Local)": group['mkt_val'].sum(),
+                        "Invested (£)": inv_gbp,
+                        "Mkt Value (£)": mkt_gbp,
+                        "Return %": ((mkt_gbp - inv_gbp) / inv_gbp * 100) if inv_gbp > 0 else 0
+                    })
+
+        sum_df = pd.DataFrame(summary_rows)
         if not sum_df.empty:
-            # Metrics Row
-            cols = st.columns(len(sum_df))
-            for i, row in sum_df.iterrows():
-                cols[i].metric(f"{row['Region']} Value", f"{row['Market Value']:,.2f}", f"{row['Return %']:.2f}%")
+            total_gbp_inv = sum_df['Invested (£)'].sum()
+            total_gbp_mkt = sum_df['Mkt Value (£)'].sum()
             
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Invested (£)", f"£{total_gbp_inv:,.2f}")
+            col2.metric("Total Market Value (£)", f"£{total_gbp_mkt:,.2f}")
+            col3.metric("Overall Return", f"{((total_gbp_mkt-total_gbp_inv)/total_gbp_inv*100):.2f}%")
+
             st.divider()
             
-            # Allocation Chart
             c1, c2 = st.columns([1, 1])
             with c1:
-                st.subheader("Regional Allocation (%)")
-                fig = px.pie(sum_df, values='Market Value', names='Region', hole=0.5, 
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.subheader("Regional Breakdown (£)")
+                fig = px.pie(sum_df, values='Mkt Value (£)', names='Region', hole=0.4)
                 st.plotly_chart(fig, use_container_width=True)
             
             with c2:
-                st.subheader("Portfolio Breakdown")
+                st.subheader("Currency Adjusted Breakdown")
                 st.table(sum_df.style.format({
-                    'Invested': "{:,.2f}", 
-                    'Market Value': "{:,.2f}", 
-                    'Return %': "{:.2f}%"
+                    'Invested (Local)': "{:,.2f}", 'Mkt Value (Local)': "{:,.2f}",
+                    'Invested (£)': "£{:,.2f}", 'Mkt Value (£)': "£{:,.2f}", 'Return %': "{:.2f}%"
                 }))
         else:
-            st.info("No data available for summary.")
+            st.info("No data available. Ensure your symbols have correct suffixes.")
 
     with set_tab:
         st.header("Settings")
@@ -159,8 +190,8 @@ if not portfolio.empty:
         if uploaded_file:
             df = pd.read_csv(uploaded_file)
             df.to_csv(DB_FILE, index=False)
-            st.success("File uploaded to system. Refreshing...")
+            st.success("File updated. Please refresh.")
             st.rerun()
 
 else:
-    st.info("No data found. Please go to the 'Settings' tab to upload your `portfolio_db.csv`.")
+    st.info("No data found. Please upload your CSV in Settings.")
