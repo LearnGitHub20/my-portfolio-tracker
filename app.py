@@ -163,4 +163,26 @@ if not df.empty:
             st.subheader("Regional Allocation Breakdown")
             st.dataframe(sum_df.style.format({
                 'Invested (£)': "£{:,.2f}", 
-                'Market Value (£)': "£{:,.2f}",
+                'Market Value (£)': "£{:,.2f}", 
+                'Total Gain (£)': "£{:,.2f}", 
+                'Allocation %': "{:.2f}%"
+            }), use_container_width=True)
+
+            # GLOBAL SECTOR CHART
+            if all_for_sector:
+                combined_all = pd.concat(all_for_sector)
+                sector_data = combined_all.groupby('sector')['mkt_val_gbp'].sum().reset_index()
+                fig = px.pie(sector_data, values='mkt_val_gbp', names='sector', hole=0.4, title="Global Sector Allocation (GBP)")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No data found to generate a summary.")
+
+    with t_set:
+        st.header("Upload Data")
+        uploaded = st.file_uploader("Upload your portfolio_db.csv", type='csv')
+        if uploaded:
+            with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
+            st.success("File saved! Please refresh using the sidebar button.")
+
+else:
+    st.info("Portfolio is empty. Upload a CSV in the Settings tab to begin.")
