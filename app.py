@@ -85,30 +85,45 @@ if not df.empty:
                 subset['prev'] = prices[1].fillna(0)
 
             # --- CALCULATIONS ---
-            subset['buy_price'] = (subset['qty'] * subset['avg_price']).fillna(0)
-            subset['mkt_val'] = (subset['qty'] * subset['ltp']).fillna(0)
-            subset['gain_loss_val'] = (subset['mkt_val'] - subset['buy_price']).fillna(0)
+            subset['buy_price'] = subset['qty'] * subset['avg_price']
+            subset['mkt_val'] = subset['qty'] * subset['ltp']
+            subset['gain_loss_val'] = subset['mkt_val'] - subset['buy_price']
             subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).fillna(0)
-            subset['day_gain'] = ((subset['ltp'] - subset['prev']) * subset['qty']).fillna(0)
+            # Today's Gain as %
+            subset['day_gain_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
+            subset['day_gain_val'] = (subset['ltp'] - subset['prev']) * subset['qty']
 
             # METRICS
             cur_sym = str(subset['curr_sym'].iloc[0])
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Invested", f"{cur_sym}{float(subset['buy_price'].sum()):,.2f}")
             m2.metric("Market Value", f"{cur_sym}{float(subset['mkt_val'].sum()):,.2f}")
-            m3.metric("Today's Net Gain", f"{cur_sym}{float(subset['day_gain'].sum()):,.2f}")
+            m3.metric("Today's Net Gain", f"{cur_sym}{float(subset['day_gain_val'].sum()):,.2f}")
 
             st.divider()
             
-            # --- SORTABLE TABLE WITH NEW COLUMNS ---
-            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain']].reset_index(drop=True)
-            disp.index += 1
+            # --- TABLE PREP ---
+            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']].copy()
+            
+            # Create Total Row
+            totals = pd.Series({
+                'symbol': 'TOTAL',
+                'sector': '-',
+                'qty': subset['qty'].sum(),
+                'mkt_val': subset['mkt_val'].sum(),
+                'buy_price': subset['buy_price'].sum(),
+                'gain_loss_val': subset['gain_loss_val'].sum(),
+                'gain_loss_pct': (subset['gain_loss_val'].sum() / subset['buy_price'].sum() * 100) if subset['buy_price'].sum() != 0 else 0,
+                'day_gain_pct': ((subset['mkt_val'].sum() - (subset['prev'] * subset['qty']).sum()) / (subset['prev'] * subset['qty']).sum() * 100) if (subset['prev'] * subset['qty']).sum() != 0 else 0
+            })
+            
+            disp = pd.concat([disp, totals.to_frame().T], ignore_index=True)
             
             styled_df = disp.style.format({
                 'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 
                 'buy_price':"{:,.2f}", 'gain_loss_val':"{:,.2f}", 
-                'gain_loss_pct':"{:.2f}%", 'day_gain':"{:,.2f}"
-            }).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain'])
+                'gain_loss_pct':"{:.2f}%", 'day_gain_pct':"{:.2f}%"
+            }).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain_pct'])
             
             st.dataframe(styled_df, use_container_width=True)
             return subset
@@ -119,7 +134,6 @@ if not df.empty:
     regional_data["London"] = render_market("London", t_lon)
     regional_data["Europe"] = render_market("Europe", t_eu)
 
-    # Summary tab logic remains consistent with GBP conversion...
     with t_sum:
         st.header("Global Summary (Converted to GBP)")
         try:
@@ -139,13 +153,14 @@ if not df.empty:
                     "Invested (£)": inv_gbp,
                     "Market Value (£)": mkt_gbp,
                     "Gain/Loss (£)": mkt_gbp - inv_gbp,
-                    "Allocation %": 0 # Placeholder for calculation
+                    "Allocation %": 0
                 })
 
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
             total_port = sum_df['Market Value (£)'].sum()
             sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_port * 100) if total_port > 0 else 0
+            
             st.dataframe(sum_df.style.format({
                 'Invested (£)': "£{:,.2f}", 'Market Value (£)': "£{:,.2f}", 
                 'Gain/Loss (£)': "£{:,.2f}", 'Allocation %': "{:.2f}%"
