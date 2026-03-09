@@ -84,39 +84,32 @@ if not df.empty:
                 subset['ltp'] = prices[0].fillna(0)
                 subset['prev'] = prices[1].fillna(0)
 
-            # --- CALCULATIONS ---
             subset['buy_price'] = subset['qty'] * subset['avg_price']
             subset['mkt_val'] = subset['qty'] * subset['ltp']
             subset['gain_loss_val'] = subset['mkt_val'] - subset['buy_price']
             subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).fillna(0)
-            # Today's Gain as %
             subset['day_gain_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
-            subset['day_gain_val'] = (subset['ltp'] - subset['prev']) * subset['qty']
 
             # METRICS
             cur_sym = str(subset['curr_sym'].iloc[0])
-            m1, m2, m3 = st.columns(3)
+            st.subheader(f"{market_name} Market Overview")
+            m1, m2 = st.columns(2)
             m1.metric("Total Invested", f"{cur_sym}{float(subset['buy_price'].sum()):,.2f}")
             m2.metric("Market Value", f"{cur_sym}{float(subset['mkt_val'].sum()):,.2f}")
-            m3.metric("Today's Net Gain", f"{cur_sym}{float(subset['day_gain_val'].sum()):,.2f}")
 
             st.divider()
             
-            # --- TABLE PREP ---
+            # --- INDIVIDUAL TAB DATASET ---
             disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']].copy()
             
-            # Create Total Row
+            # TOTAL ROW
             totals = pd.Series({
-                'symbol': 'TOTAL',
-                'sector': '-',
-                'qty': subset['qty'].sum(),
-                'mkt_val': subset['mkt_val'].sum(),
-                'buy_price': subset['buy_price'].sum(),
+                'symbol': 'TOTAL', 'sector': '-', 'qty': subset['qty'].sum(),
+                'mkt_val': subset['mkt_val'].sum(), 'buy_price': subset['buy_price'].sum(),
                 'gain_loss_val': subset['gain_loss_val'].sum(),
                 'gain_loss_pct': (subset['gain_loss_val'].sum() / subset['buy_price'].sum() * 100) if subset['buy_price'].sum() != 0 else 0,
                 'day_gain_pct': ((subset['mkt_val'].sum() - (subset['prev'] * subset['qty']).sum()) / (subset['prev'] * subset['qty']).sum() * 100) if (subset['prev'] * subset['qty']).sum() != 0 else 0
             })
-            
             disp = pd.concat([disp, totals.to_frame().T], ignore_index=True)
             
             styled_df = disp.style.format({
@@ -125,17 +118,18 @@ if not df.empty:
                 'gain_loss_pct':"{:.2f}%", 'day_gain_pct':"{:.2f}%"
             }).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain_pct'])
             
-            st.dataframe(styled_df, use_container_width=True)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
             return subset
 
-    # Rendering Tabs
+    # Processing Regional Tabs
     regional_data["India"] = render_market("India", t_in)
     regional_data["US"] = render_market("US", t_us)
     regional_data["London"] = render_market("London", t_lon)
     regional_data["Europe"] = render_market("Europe", t_eu)
 
+    # --- SUMMARY TAB ---
     with t_sum:
-        st.header("Global Summary (Converted to GBP)")
+        st.header("Global Portfolio Summary")
         try:
             rates_df = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
             rates = {"USD": rates_df["GBPUSD=X"].iloc[-1], "INR": rates_df["GBPINR=X"].iloc[-1], "EUR": rates_df["GBPEUR=X"].iloc[-1], "GBP": 1.0}
@@ -146,25 +140,45 @@ if not df.empty:
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
                 code = m_df['curr_code'].iloc[0]
-                inv_gbp = float(m_df['buy_price'].sum() / rates[code])
-                mkt_gbp = float(m_df['mkt_val'].sum() / rates[code])
+                sym = m_df['curr_sym'].iloc[0]
+                
+                inv_local = m_df['buy_price'].sum()
+                mkt_local = m_df['mkt_val'].sum()
+                mkt_gbp = mkt_local / rates[code]
+                
                 summary_rows.append({
                     "Market": m_name,
-                    "Invested (£)": inv_gbp,
-                    "Market Value (£)": mkt_gbp,
-                    "Gain/Loss (£)": mkt_gbp - inv_gbp,
-                    "Allocation %": 0
+                    "Currency": sym,
+                    "Invested (Local)": inv_local,
+                    "Market Value (Local)": mkt_local,
+                    "Market Value (£)": mkt_gbp
                 })
 
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
-            total_port = sum_df['Market Value (£)'].sum()
-            sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_port * 100) if total_port > 0 else 0
+            total_gbp = sum_df['Market Value (£)'].sum()
+            sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_gbp * 100)
             
+            # --- SUMMARY TABLE ---
             st.dataframe(sum_df.style.format({
-                'Invested (£)': "£{:,.2f}", 'Market Value (£)': "£{:,.2f}", 
-                'Gain/Loss (£)': "£{:,.2f}", 'Allocation %': "{:.2f}%"
-            }).applymap(style_gains, subset=['Gain/Loss (£)']), use_container_width=True)
+                'Invested (Local)': "{:,.2f}", 
+                'Market Value (Local)': "{:,.2f}", 
+                'Market Value (£)': "£{:,.2f}", 
+                'Allocation %': "{:.2f}%"
+            }), use_container_width=True, hide_index=True)
+
+            st.divider()
+            
+            # --- DONUT PIE CHART ---
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                fig = px.pie(sum_df, values='Market Value (£)', names='Market', 
+                             hole=0.5, title="Global Asset Allocation (GBP Value)",
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                st.metric("Total Portfolio Value", f"£{total_gbp:,.2f}")
+                st.write("Allocation calculated based on current live exchange rates.")
 
     with t_set:
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
