@@ -39,10 +39,11 @@ def get_market_label(symbol):
     if s.endswith('.NS') or s.endswith('.BO'): return "India", "₹", "INR"
     return "US", "$", "USD"
 
-# --- COLOR STYLING FUNCTION ---
 def style_gains(val):
-    color = 'red' if val < 0 else 'green' if val > 0 else 'white'
-    return f'color: {color}'
+    if isinstance(val, (int, float)):
+        color = 'red' if val < 0 else 'green' if val > 0 else 'white'
+        return f'color: {color}'
+    return ''
 
 # --- UI ---
 st.title("🌍 Global Multi-Market Tracker")
@@ -83,37 +84,42 @@ if not df.empty:
                 subset['ltp'] = prices[0].fillna(0)
                 subset['prev'] = prices[1].fillna(0)
 
-            subset['invested'] = (subset['qty'] * subset['avg_price']).fillna(0)
+            # --- CALCULATIONS ---
+            subset['buy_price'] = (subset['qty'] * subset['avg_price']).fillna(0)
             subset['mkt_val'] = (subset['qty'] * subset['ltp']).fillna(0)
+            subset['gain_loss_val'] = (subset['mkt_val'] - subset['buy_price']).fillna(0)
+            subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).fillna(0)
             subset['day_gain'] = ((subset['ltp'] - subset['prev']) * subset['qty']).fillna(0)
 
             # METRICS
             cur_sym = str(subset['curr_sym'].iloc[0])
             m1, m2, m3 = st.columns(3)
-            m1.metric("Total Invested", f"{cur_sym}{float(subset['invested'].sum()):,.2f}")
+            m1.metric("Total Invested", f"{cur_sym}{float(subset['buy_price'].sum()):,.2f}")
             m2.metric("Market Value", f"{cur_sym}{float(subset['mkt_val'].sum()):,.2f}")
             m3.metric("Today's Net Gain", f"{cur_sym}{float(subset['day_gain'].sum()):,.2f}")
 
             st.divider()
             
-            # --- INTERACTIVE & SORTABLE TABLE ---
-            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'day_gain']].reset_index(drop=True)
+            # --- SORTABLE TABLE WITH NEW COLUMNS ---
+            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain']].reset_index(drop=True)
             disp.index += 1
             
-            # Applying color styling to the 'day_gain' column
             styled_df = disp.style.format({
-                'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 'day_gain':"{:,.2f}"
-            }).applymap(style_gains, subset=['day_gain'])
+                'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 
+                'buy_price':"{:,.2f}", 'gain_loss_val':"{:,.2f}", 
+                'gain_loss_pct':"{:.2f}%", 'day_gain':"{:,.2f}"
+            }).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain'])
             
             st.dataframe(styled_df, use_container_width=True)
             return subset
 
-    # Processing Regional Tabs
+    # Rendering Tabs
     regional_data["India"] = render_market("India", t_in)
     regional_data["US"] = render_market("US", t_us)
     regional_data["London"] = render_market("London", t_lon)
     regional_data["Europe"] = render_market("Europe", t_eu)
 
+    # Summary tab logic remains consistent with GBP conversion...
     with t_sum:
         st.header("Global Summary (Converted to GBP)")
         try:
@@ -121,41 +127,29 @@ if not df.empty:
             rates = {"USD": rates_df["GBPUSD=X"].iloc[-1], "INR": rates_df["GBPINR=X"].iloc[-1], "EUR": rates_df["GBPEUR=X"].iloc[-1], "GBP": 1.0}
         except:
             rates = {"USD": 1.3, "INR": 105.0, "EUR": 1.18, "GBP": 1.0}
-            st.warning("Using static FX rates.")
 
         summary_rows = []
-        all_for_sector = []
-        
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
                 code = m_df['curr_code'].iloc[0]
-                inv_gbp = float(m_df['invested'].sum() / rates[code])
+                inv_gbp = float(m_df['buy_price'].sum() / rates[code])
                 mkt_gbp = float(m_df['mkt_val'].sum() / rates[code])
-                
                 summary_rows.append({
                     "Market": m_name,
                     "Invested (£)": inv_gbp,
                     "Market Value (£)": mkt_gbp,
-                    "Gain/Loss (£)": mkt_gbp - inv_gbp
+                    "Gain/Loss (£)": mkt_gbp - inv_gbp,
+                    "Allocation %": 0 # Placeholder for calculation
                 })
-                m_df['mkt_val_gbp'] = m_df['mkt_val'] / rates[code]
-                all_for_sector.append(m_df)
 
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
             total_port = sum_df['Market Value (£)'].sum()
             sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_port * 100) if total_port > 0 else 0
-            
             st.dataframe(sum_df.style.format({
                 'Invested (£)': "£{:,.2f}", 'Market Value (£)': "£{:,.2f}", 
                 'Gain/Loss (£)': "£{:,.2f}", 'Allocation %': "{:.2f}%"
             }).applymap(style_gains, subset=['Gain/Loss (£)']), use_container_width=True)
-
-            if all_for_sector:
-                combined = pd.concat(all_for_sector)
-                sector_data = combined.groupby('sector')['mkt_val_gbp'].sum().reset_index()
-                fig = px.pie(sector_data, values='mkt_val_gbp', names='sector', hole=0.4, title="Global Sector Allocation (GBP)")
-                st.plotly_chart(fig, use_container_width=True)
 
     with t_set:
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
