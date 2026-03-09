@@ -6,166 +6,207 @@ import os
 
 # --- CONFIG ---
 DB_FILE = "portfolio_db.csv"
-st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon="🌍")
+st.set_page_config(layout="wide", page_title="Universal Wealth Tracker", page_icon="🌍")
 
-# --- 1. DATA LOADING & SECTOR MAPPING ---
-def load_and_clean_data():
+# --- 1. ROBUST DATA LOADER ---
+def load_data():
     if not os.path.exists(DB_FILE):
-        return pd.DataFrame(columns=['symbol', 'qty', 'avg_price', 'sector'])
+        return pd.DataFrame()
     try:
         df = pd.read_csv(DB_FILE, on_bad_lines='skip', engine='python')
         df.columns = [str(c).strip().lower() for c in df.columns]
         
-        # Expanded patterns to include 'sector'
-        patterns = {
-            'symbol': ['symbol', 'ticker'], 
-            'qty': ['qty', 'quantity'], 
+        # Mapping headers
+        mapping = {
+            'symbol': ['symbol', 'ticker'],
+            'qty': ['qty', 'quantity', 'units'],
             'avg_price': ['price', 'avg', 'cost'],
-            'sector': ['sector', 'industry', 'category']
+            'sector': ['sector', 'industry']
         }
         
-        col_map = {actual: target for target, aliases in patterns.items() 
-                   for actual in df.columns if any(alias in actual for alias in aliases)}
-        df = df.rename(columns=col_map)
+        final_cols = {}
+        for target, aliases in mapping.items():
+            for col in df.columns:
+                if any(alias in col for alias in aliases):
+                    final_cols[col] = target
+                    break
         
-        if 'symbol' in df.columns:
-            df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
-            df['qty'] = pd.to_numeric(df['qty'].astype(str).str.replace('[^0-9.]', '', regex=True), errors='coerce')
-            df['avg_price'] = pd.to_numeric(df['avg_price'].astype(str).str.replace('[^0-9.]', '', regex=True), errors='coerce')
+        df = df.rename(columns=final_cols)
+        
+        # Ensure Sector column exists
+        if 'sector' not in df.columns:
+            df['sector'] = 'Other'
             
-            # Fill empty sectors with 'Unknown' if column exists, else create it
-            if 'sector' not in df.columns:
-                df['sector'] = 'General'
-            df['sector'] = df['sector'].fillna('General').astype(str)
-            
-            return df[['symbol', 'qty', 'avg_price', 'sector']].dropna(subset=['symbol'])
-    except: pass
-    return pd.DataFrame(columns=['symbol', 'qty', 'avg_price', 'sector'])
+        # Clean data types
+        df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
+        df['qty'] = pd.to_numeric(df['qty'], errors='coerce')
+        df['avg_price'] = pd.to_numeric(df['avg_price'], errors='coerce')
+        
+        return df[['symbol', 'qty', 'avg_price', 'sector']].dropna(subset=['symbol'])
+    except Exception as e:
+        st.error(f"Error loading CSV: {e}")
+        return pd.DataFrame()
 
-# --- 2. THE PRIORITY MARKET SELECTOR ---
-def get_market_info(symbol):
-    sym = str(symbol).upper()
-    
-    # PRIORITY 1: LONDON (Must be .L)
-    if sym.endswith('.L'): 
+# --- 2. THE MARKET DISPATCHER (THE FIX) ---
+def get_market_details(symbol):
+    s = str(symbol).upper()
+    # 1. LONDON CHECK (Highest Priority)
+    if s.endswith('.L'):
         return "London", "£", "GBP"
-    
-    # PRIORITY 2: INDIA
-    if sym.endswith('.NS') or sym.endswith('.BO'): 
+    # 2. INDIA CHECK
+    if s.endswith('.NS') or s.endswith('.BO'):
         return "India", "₹", "INR"
-    
-    # PRIORITY 3: EUROPE (Excluding .L)
-    if any(sym.endswith(s) for s in ['.DE', '.PA', '.AS', '.MI', '.MC', '.LS', '.MA']): 
+    # 3. EUROPE CHECK (Rest of Europe)
+    if any(s.endswith(ext) for ext in ['.PA', '.DE', '.AS', '.MI', '.MC', '.LS']):
         return "Europe", "€", "EUR"
-    
-    # PRIORITY 4: US (Default)
+    # 4. DEFAULT TO US
     return "US", "$", "USD"
 
-# --- 3. UI DASHBOARD ---
+# --- 3. MAIN APP ---
 st.title("🌍 Global Multi-Market Tracker")
 
-if st.button("🔄 Full Market Refresh"):
+# Refresh Button at the very top
+if st.button("🔄 Refresh All Prices & Exchange Rates"):
     st.cache_data.clear()
     st.rerun()
 
-portfolio = load_and_clean_data()
+raw_df = load_data()
 
-if not portfolio.empty:
-    master_df = portfolio.copy()
-    m_info = master_df['symbol'].apply(lambda x: pd.Series(get_market_info(x)))
-    master_df[['market_group', 'curr_sym', 'curr_code']] = m_info
+if not raw_df.empty:
+    # Apply Market Grouping
+    market_data = raw_df['symbol'].apply(lambda x: pd.Series(get_market_details(x)))
+    raw_df[['market_group', 'curr_sym', 'curr_code']] = market_data
 
-    # 5 Main Tabs + Settings
-    sum_tab, in_tab, us_tab, lon_tab, eu_tab, set_tab = st.tabs([
-        "📊 Summary", "🇮🇳 India", "🇺🇸 US", "🇬🇧 London", "🇪🇺 Europe", "⚙️ Settings"
-    ])
+    # Create Tabs
+    tabs = st.tabs(["📊 Summary", "🇮🇳 India", "🇺🇸 US", "🇬🇧 London", "🇪🇺 Europe", "⚙️ Settings"])
+    
+    # Storage for Summary
+    regional_dfs = {}
 
-    def render_market_tab(df_subset, market_key):
-        # We filter the master data specifically by the hard-coded market_group
-        filtered_df = df_subset[df_subset['market_group'] == market_key].copy()
-        
-        if filtered_df.empty:
-            st.info(f"No holdings found for {market_key}.")
-            return None
-        
-        tickers = filtered_df['symbol'].unique().tolist()
-        fetch_tickers = [t if ('.' in t or market_key != "India") else f"{t}.NS" for t in tickers]
-        
-        with st.status(f"Fetching {market_key} Prices..."):
-            data = yf.download(fetch_tickers, period="2d", progress=False)['Close']
-            def get_price(sym):
-                try:
-                    t = sym if ('.' in sym or market_key != "India") else f"{sym}.NS"
-                    val = data[t] if len(fetch_tickers) > 1 else data
-                    return val.iloc[-1], val.iloc[-2]
-                except: return 0.0, 0.0
+    # --- 4. REGIONAL TAB LOGIC ---
+    def render_tab(df_full, market_key, tab_obj):
+        subset = df_full[df_full['market_group'] == market_key].copy()
+        with tab_obj:
+            if subset.empty:
+                st.info(f"No holdings found for {market_key}.")
+                return None
             
-            prices = filtered_df['symbol'].apply(lambda x: pd.Series(get_price(x)))
-            filtered_df['ltp'], filtered_df['prev'] = prices[0], prices[1]
-
-        filtered_df['invested'] = filtered_df['qty'] * filtered_df['avg_price']
-        filtered_df['mkt_val'] = filtered_df['qty'] * filtered_df['ltp']
-        filtered_df['day_gain'] = (filtered_df['ltp'] - filtered_df['prev']) * filtered_df['qty']
-
-        # Header Metrics
-        curr = filtered_df['curr_sym'].iloc[0]
-        m1, m2, m3 = st.columns(3)
-        m1.metric(f"{market_key} Invested", f"{curr}{filtered_df['invested'].sum():,.2f}")
-        m2.metric("Market Value", f"{curr}{filtered_df['mkt_val'].sum():,.2f}")
-        m3.metric("Today's Gain", f"{curr}{filtered_df['day_gain'].sum():,.2f}")
-
-        st.divider()
-
-        # Display Table (Including Sector)
-        df_disp = filtered_df[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val']].reset_index(drop=True)
-        df_disp.index += 1
-        st.dataframe(df_disp.style.format({
-            'avg_price': f"{curr}{{:.2f}}", 'ltp': f"{curr}{{:.2f}}", 'mkt_val': f"{curr}{{:.2f}}"
-        }), use_container_width=True)
-        return filtered_df
-
-    # Render Regional Tabs specifically using the market_group keys
-    with in_tab: in_df = render_market_tab(master_df, "India")
-    with us_tab: us_df = render_market_tab(master_df, "US")
-    with lon_tab: lon_df = render_market_tab(master_df, "London")
-    with eu_tab: eu_df = render_market_tab(master_df, "Europe")
-
-    # --- 4. SUMMARY & SECTOR ANALYSIS ---
-    with sum_tab:
-        with st.spinner("Calculating Global GBP Totals..."):
-            fx = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
-            rates = {"USD": fx["GBPUSD=X"].iloc[-1], "INR": fx["GBPINR=X"].iloc[-1], "EUR": fx["GBPEUR=X"].iloc[-1], "GBP": 1.0}
+            # Fetch Prices
+            tickers = subset['symbol'].tolist()
+            # Handle India Suffix if missing
+            fetch_list = [t if ('.' in t or market_key != "India") else f"{t}.NS" for t in tickers]
             
-            summary_list = []
-            combined_all = []
-            for df_reg, name in [(in_df, "India"), (us_df, "USA"), (lon_df, "London"), (eu_df, "Europe")]:
-                if df_reg is not None and not df_reg.empty:
-                    combined_all.append(df_reg)
-                    inv_gbp = df_reg['invested'].sum() / rates[df_reg['curr_code'].iloc[0]]
-                    mkt_gbp = df_reg['mkt_val'].sum() / rates[df_reg['curr_code'].iloc[0]]
-                    summary_list.append({
-                        "Market": name,
-                        "Invested (£)": inv_gbp,
-                        "Market Value (£)": mkt_gbp,
-                        "Return %": ((mkt_gbp - inv_gbp) / inv_gbp * 100) if inv_gbp > 0 else 0
-                    })
-
-            if summary_list:
-                sum_df = pd.DataFrame(summary_list)
-                total_mkt_gbp = sum_df['Market Value (£)'].sum()
-                sum_df['Portfolio %'] = (sum_df['Market Value (£)'] / total_mkt_gbp) * 100
-
-                st.subheader("Global Breakdown (£)")
-                st.table(sum_df.style.format({
-                    'Invested (£)': "£{:,.2f}", 'Market Value (£)': "£{:,.2f}", 
-                    'Return %': "{:.2f}%", 'Portfolio %': "{:.2f}%"
-                }))
-
-                # SECTOR BREAKDOWN
-                st.divider()
-                st.subheader("Sector Allocation (Global)")
-                full_portfolio = pd.concat(combined_all)
-                # Normalize values to GBP for the sector chart
-                full_portfolio['val_gbp'] = full_portfolio.apply(lambda x: x['mkt_val'] / rates[x['curr_code']], axis=1)
+            with st.status(f"Fetching {market_key} Prices...", expanded=False):
+                data = yf.download(fetch_list, period="2d", progress=False)['Close']
+                def get_p(sym):
+                    try:
+                        t = sym if ('.' in sym or market_key != "India") else f"{sym}.NS"
+                        v = data[t] if len(fetch_list) > 1 else data
+                        return v.iloc[-1], v.iloc[-2]
+                    except: return 0.0, 0.0
                 
-                sector_df = full_portfolio.groupby('sector')['val_gbp'].sum().reset_index()
+                prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
+                subset['ltp'], subset['prev'] = prices[0], prices[1]
+
+            subset['invested'] = subset['qty'] * subset['avg_price']
+            subset['mkt_val'] = subset['qty'] * subset['ltp']
+            subset['day_gain'] = (subset['ltp'] - subset['prev']) * subset['qty']
+            
+            # Tab Header
+            sym = subset['curr_sym'].iloc[0]
+            m1, m2, m3 = st.columns(3)
+            m1.metric(f"Total Invested ({market_key})", f"{sym}{subset['invested'].sum():,.2f}")
+            m2.metric("Market Value", f"{sym}{subset['mkt_val'].sum():,.2f}")
+            m3.metric("Today's Gain", f"{sym}{subset['day_gain'].sum():,.2f}")
+            
+            st.divider()
+            
+            # Regional Table with Serial Number
+            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val']].reset_index(drop=True)
+            disp.index += 1
+            st.dataframe(disp.style.format({'avg_price': f"{sym}{{:.2f}}", 'ltp': f"{sym}{{:.2f}}", 'mkt_val': f"{sym}{{:.2f}}"}), use_container_width=True)
+            return subset
+
+    # Render each tab (Except Summary and Settings)
+    regional_dfs["India"] = render_tab(raw_df, "India", tabs[1])
+    regional_dfs["US"] = render_tab(raw_df, "US", tabs[2])
+    regional_dfs["London"] = render_tab(raw_df, "London", tabs[3])
+    regional_dfs["Europe"] = render_tab(raw_df, "Europe", tabs[4])
+
+    # --- 5. SUMMARY TAB (WITH GBP CONVERSION) ---
+    with tabs[0]:
+        st.header("Global Portfolio Summary (Converted to GBP)")
+        
+        # Live FX Conversion
+        fx = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
+        rates = {"USD": fx["GBPUSD=X"].iloc[-1], "INR": fx["GBPINR=X"].iloc[-1], "EUR": fx["GBPEUR=X"].iloc[-1], "GBP": 1.0}
+        
+        sum_rows = []
+        full_portfolio_gbp = []
+        
+        for name, df_reg in regional_dfs.items():
+            if df_reg is not None and not df_reg.empty:
+                # Get the code for the first stock in this group
+                code = df_reg['curr_code'].iloc[0]
+                
+                inv_local = df_reg['invested'].sum()
+                mkt_local = df_reg['mkt_val'].sum()
+                
+                # Convert to GBP
+                inv_gbp = inv_local / rates[code]
+                mkt_gbp = mkt_local / rates[code]
+                
+                sum_rows.append({
+                    "Market": name,
+                    "Invested (Local)": inv_local,
+                    "Mkt Value (Local)": mkt_local,
+                    "Invested (£)": inv_gbp,
+                    "Mkt Value (£)": mkt_gbp,
+                    "Total Return %": ((mkt_gbp - inv_gbp) / inv_gbp * 100) if inv_gbp > 0 else 0
+                })
+                
+                # Prepare for Sector Chart
+                df_reg['mkt_val_gbp'] = df_reg['mkt_val'] / rates[code]
+                full_portfolio_gbp.append(df_reg)
+
+        if sum_rows:
+            sum_df = pd.DataFrame(sum_rows)
+            total_gbp = sum_df['Mkt Value (£)'].sum()
+            sum_df['Allocation %'] = (sum_df['Mkt Value (£)'] / total_gbp) * 100
+            
+            # Global Metrics
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Total Global Value", f"£{total_gbp:,.2f}")
+            g2.metric("Total Global Invested", f"£{sum_df['Invested (£)'].sum():,.2f}")
+            g3.metric("Global Net Return", f"{((total_gbp - sum_df['Invested (£)'].sum()) / sum_df['Invested (£)'].sum() * 100):.2f}%")
+            
+            st.divider()
+            
+            # Final Summary Table
+            st.subheader("Regional Allocation and GBP Conversion")
+            st.dataframe(sum_df.style.format({
+                'Invested (Local)': "{:,.2f}", 'Mkt Value (Local)': "{:,.2f}",
+                'Invested (£)': "£{:,.2f}", 'Mkt Value (£)': "£{:,.2f}",
+                'Total Return %': "{:.2f}%", 'Allocation %': "{:.2f}%"
+            }), use_container_width=True)
+
+            # Sector Diversification Chart
+            all_data = pd.concat(full_portfolio_gbp)
+            sector_data = all_data.groupby('sector')['mkt_val_gbp'].sum().reset_index()
+            fig = px.bar(sector_data.sort_values('mkt_val_gbp', ascending=False), 
+                         x='sector', y='mkt_val_gbp', title="Global Sector Exposure (£)", 
+                         labels={'mkt_val_gbp': 'Value in GBP'}, color='sector')
+            st.plotly_chart(fig, use_container_width=True)
+
+    # --- 6. SETTINGS ---
+    with tabs[5]:
+        st.header("Data Settings")
+        st.info("Ensure CSV has columns: Symbol, Qty, Price, Sector")
+        uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
+        if uploaded:
+            with open(DB_FILE, "wb") as f:
+                f.write(uploaded.getbuffer())
+            st.success("File uploaded! Click 'Refresh' at the top.")
+
+else:
+    st.info("No data found. Please upload your CSV in the Settings tab.")
