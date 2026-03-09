@@ -3,7 +3,6 @@ import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import os
-import numpy as np
 
 # --- INITIAL SETUP ---
 DB_FILE = "portfolio_db.csv"
@@ -40,6 +39,11 @@ def get_market_label(symbol):
     if s.endswith('.NS') or s.endswith('.BO'): return "India", "₹", "INR"
     return "US", "$", "USD"
 
+# --- COLOR STYLING FUNCTION ---
+def style_gains(val):
+    color = 'red' if val < 0 else 'green' if val > 0 else 'white'
+    return f'color: {color}'
+
 # --- UI ---
 st.title("🌍 Global Multi-Market Tracker")
 
@@ -72,9 +76,7 @@ if not df.empty:
                     try:
                         t = sym if ('.' in sym or market_name != "India") else f"{sym}.NS"
                         v = data[t] if len(fetch_list) > 1 else data
-                        price = v.iloc[-1]
-                        prev = v.iloc[-2]
-                        return float(price), float(prev)
+                        return float(v.iloc[-1]), float(v.iloc[-2])
                     except: return 0.0, 0.0
                 
                 prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
@@ -85,24 +87,28 @@ if not df.empty:
             subset['mkt_val'] = (subset['qty'] * subset['ltp']).fillna(0)
             subset['day_gain'] = ((subset['ltp'] - subset['prev']) * subset['qty']).fillna(0)
 
-            # --- HARDENED METRICS ---
+            # METRICS
             cur_sym = str(subset['curr_sym'].iloc[0])
-            total_inv = float(subset['invested'].sum())
-            total_mkt = float(subset['mkt_val'].sum())
-            total_day = float(subset['day_gain'].sum())
-
             m1, m2, m3 = st.columns(3)
-            m1.metric("Invested", f"{cur_sym}{total_inv:,.2f}")
-            m2.metric("Market Value", f"{cur_sym}{total_mkt:,.2f}")
-            m3.metric("Today's Gain", f"{cur_sym}{total_day:,.2f}")
+            m1.metric("Total Invested", f"{cur_sym}{float(subset['invested'].sum()):,.2f}")
+            m2.metric("Market Value", f"{cur_sym}{float(subset['mkt_val'].sum()):,.2f}")
+            m3.metric("Today's Net Gain", f"{cur_sym}{float(subset['day_gain'].sum()):,.2f}")
 
-            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val']].reset_index(drop=True)
+            st.divider()
+            
+            # --- INTERACTIVE & SORTABLE TABLE ---
+            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'day_gain']].reset_index(drop=True)
             disp.index += 1
-            st.dataframe(disp.style.format({
-                'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}"
-            }), use_container_width=True)
+            
+            # Applying color styling to the 'day_gain' column
+            styled_df = disp.style.format({
+                'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 'day_gain':"{:,.2f}"
+            }).applymap(style_gains, subset=['day_gain'])
+            
+            st.dataframe(styled_df, use_container_width=True)
             return subset
 
+    # Processing Regional Tabs
     regional_data["India"] = render_market("India", t_in)
     regional_data["US"] = render_market("US", t_us)
     regional_data["London"] = render_market("London", t_lon)
@@ -115,7 +121,7 @@ if not df.empty:
             rates = {"USD": rates_df["GBPUSD=X"].iloc[-1], "INR": rates_df["GBPINR=X"].iloc[-1], "EUR": rates_df["GBPEUR=X"].iloc[-1], "GBP": 1.0}
         except:
             rates = {"USD": 1.3, "INR": 105.0, "EUR": 1.18, "GBP": 1.0}
-            st.warning("Using static FX rates (live rates currently unavailable).")
+            st.warning("Using static FX rates.")
 
         summary_rows = []
         all_for_sector = []
@@ -140,24 +146,21 @@ if not df.empty:
             total_port = sum_df['Market Value (£)'].sum()
             sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_port * 100) if total_port > 0 else 0
             
-            st.subheader("Regional Allocation (GBP Converted)")
             st.dataframe(sum_df.style.format({
                 'Invested (£)': "£{:,.2f}", 'Market Value (£)': "£{:,.2f}", 
                 'Gain/Loss (£)': "£{:,.2f}", 'Allocation %': "{:.2f}%"
-            }), use_container_width=True)
+            }).applymap(style_gains, subset=['Gain/Loss (£)']), use_container_width=True)
 
             if all_for_sector:
                 combined = pd.concat(all_for_sector)
                 sector_data = combined.groupby('sector')['mkt_val_gbp'].sum().reset_index()
                 fig = px.pie(sector_data, values='mkt_val_gbp', names='sector', hole=0.4, title="Global Sector Allocation (GBP)")
                 st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Upload data to see summary.")
 
     with t_set:
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
         if uploaded:
             with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
-            st.success("File uploaded. Reboot app or refresh.")
+            st.success("File uploaded. Click Refresh.")
 else:
     st.info("Portfolio empty. Upload CSV in Settings.")
