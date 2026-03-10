@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
+import plotly.graph_objects as go
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- INITIAL SETUP ---
 DB_FILE = "portfolio_db.csv"
@@ -43,7 +44,6 @@ def load_data():
     return pd.DataFrame()
 
 def save_history(total_val, curr_code):
-    """Saves total portfolio value in the current display currency."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     new_entry = pd.DataFrame([[now, total_val, curr_code]], columns=["Timestamp", "Value", "Currency"])
     if not os.path.exists(HIST_FILE):
@@ -85,7 +85,7 @@ if not df.empty:
             fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
             
             with st.status(f"Updating {market_name} Prices...", expanded=False):
-                data = yf.download(fetch_list, period="2d", progress=False)['Close']
+                data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
                 def get_p(sym):
                     try:
                         t = sym if ('.' in sym or market_name != "India") else f"{sym}.NS"
@@ -124,15 +124,30 @@ if not df.empty:
     for i, name in enumerate(["India", "US", "London", "Europe"]):
         regional_data[name] = render_market(name, tabs[i+1])
 
-    # --- SUMMARY TAB WITH DYNAMIC CURRENCY ---
+    # --- SUMMARY TAB ---
     with tabs[0]:
         st.header(f"Global Portfolio Summary ({display_curr})")
+        
+        # --- GLOBAL MARKET INDICES ---
+        st.subheader("🌍 Major Global Indices (Today)")
+        index_tickers = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
+        
         try:
-            # Fetch conversion rates relative to display currency
+            with st.status("Refreshing Global Indices...", expanded=False):
+                idx_data = yf.download(list(index_tickers.keys()), period="2d", progress=False, threads=False)['Close']
+                cols = st.columns(len(index_tickers))
+                for i, (ticker, name) in enumerate(index_tickers.items()):
+                    curr_i, prev_i = float(idx_data[ticker].iloc[-1]), float(idx_data[ticker].iloc[-2])
+                    chg_i = ((curr_i - prev_i) / prev_i) * 100
+                    cols[i].metric(name, f"{curr_i:,.2f}", f"{chg_i:+.2f}%")
+        except: st.error("Global Indices unavailable.")
+
+        st.divider()
+
+        # --- CONVERSION RATES & SUMMARY ---
+        try:
             pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
-            fx_data = yf.download(pairs, period="1d", progress=False)['Close']
-            
-            # rate = 1 unit of display_curr in target_curr
+            fx_data = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx_data[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx_data else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
             rates[display_curr] = 1.0
         except: rates = {"USD": 1.3, "INR": 105.0, "EUR": 1.18, "GBP": 1.0}
@@ -141,13 +156,8 @@ if not df.empty:
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
                 m_curr = m_df['curr_code'].iloc[0]
-                mkt_local = m_df['mkt_val'].sum()
-                # Convert local to display currency: local / (display_unit_in_local)
-                val_display = mkt_local / rates[m_curr]
-                summary_rows.append({
-                    "Market": m_name, "Currency": m_df['curr_sym'].iloc[0], 
-                    "Market Value (Local)": mkt_local, f"Value ({display_curr})": val_display
-                })
+                val_display = m_df['mkt_val'].sum() / rates[m_curr]
+                summary_rows.append({"Market": m_name, "Currency": m_df['curr_sym'].iloc[0], "Market Value (Local)": m_df['mkt_val'].sum(), f"Value ({display_curr})": val_display})
         
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
@@ -156,20 +166,40 @@ if not df.empty:
             
             st.dataframe(sum_df.style.format({'Market Value (Local)': "{:,.2f}", f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
+            # --- BENCHMARK COMPARISON ---
+            st.divider()
+            st.subheader("📈 Portfolio Performance vs Benchmark (Last 30 Days)")
+            bench_choice = st.selectbox("Select Benchmark:", ["S&P 500 (^GSPC)", "Nifty 50 (^NSEI)", "NASDAQ (^IXIC)"])
+            bench_ticker = bench_choice.split("(")[1].replace(")", "")
+            
+            if os.path.exists(HIST_FILE):
+                try:
+                    h_df = pd.read_csv(HIST_FILE)
+                    h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
+                    match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
+                    
+                    if len(match_h) > 1:
+                        bench_data = yf.download(bench_ticker, start=match_h['Timestamp'].min(), progress=False, threads=False)['Close']
+                        
+                        # Normalize to 100% for comparison
+                        port_norm = (match_h['Value'] / match_h['Value'].iloc[0]) * 100
+                        bench_norm = (bench_data / bench_data.iloc[0]) * 100
+                        
+                        fig_comp = go.Figure()
+                        fig_comp.add_trace(go.Scatter(x=match_h['Timestamp'], y=port_norm, name="Your Portfolio", line=dict(color='gold', width=3)))
+                        fig_comp.add_trace(go.Scatter(x=bench_data.index, y=bench_norm, name=bench_choice, line=dict(color='gray', dash='dash')))
+                        fig_comp.update_layout(title="Relative Performance (Base 100)", xaxis_title="Date", yaxis_title="Normalized Value (%)")
+                        st.plotly_chart(fig_comp, use_container_width=True)
+                except: st.info("Add more history to enable comparison.")
+
             st.divider()
             c1, c2 = st.columns(2)
             with c1:
-                fig_pie = px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.5, title=f"Global Allocation ({display_curr})")
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.5, title="Global Allocation"), use_container_width=True)
             with c2:
                 st.metric(f"Total Portfolio ({display_curr})", f"{curr_icons[display_curr]}{total_val:,.2f}")
-                if os.path.exists(HIST_FILE):
-                    h_df = pd.read_csv(HIST_FILE)
-                    # Filter history to only show records that match current display currency for consistency
-                    match_h = h_df[h_df['Currency'] == display_curr]
-                    if len(match_h) > 1:
-                        fig_line = px.line(match_h, x="Timestamp", y="Value", markers=True, title=f"History in {display_curr}")
-                        st.plotly_chart(fig_line, use_container_width=True)
+                if 'match_h' in locals() and len(match_h) > 1:
+                    st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", markers=True, title="Portfolio History"), use_container_width=True)
             
             save_history(total_val, display_curr)
 
