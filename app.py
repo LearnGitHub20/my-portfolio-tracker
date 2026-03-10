@@ -14,21 +14,20 @@ def load_data():
     try:
         df = pd.read_csv(DB_FILE, on_bad_lines='skip', engine='python')
         df.columns = [str(c).strip().lower() for c in df.columns]
+        # Removed sector from mapping
         mapping = {
             'symbol':['symbol','ticker'], 
             'qty':['qty','quantity'], 
-            'avg_price':['price','avg','cost'], 
-            'sector':['sector','industry']
+            'avg_price':['price','avg','cost']
         }
         inv_map = {col: target for target, aliases in mapping.items() for col in df.columns if any(a in col for a in aliases)}
         df = df.rename(columns=inv_map)
         
-        if 'sector' not in df.columns: df['sector'] = 'General'
         if 'symbol' in df.columns:
             df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
             df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
             df['avg_price'] = pd.to_numeric(df['avg_price'], errors='coerce').fillna(0)
-            return df.dropna(subset=['symbol'])
+            return df[['symbol', 'qty', 'avg_price']].dropna(subset=['symbol'])
     except: return pd.DataFrame()
     return pd.DataFrame()
 
@@ -96,14 +95,14 @@ if not df.empty:
             subset['allocation_pct'] = (subset['mkt_val'] / total_mkt_val * 100) if total_mkt_val != 0 else 0
             
             st.subheader(f"🔝 Top 10 {market_name} Holdings")
-            top_10 = subset.nlargest(10, 'allocation_pct')[['symbol', 'sector', 'mkt_val', 'allocation_pct']]
+            top_10 = subset.nlargest(10, 'allocation_pct')[['symbol', 'mkt_val', 'allocation_pct']]
             st.dataframe(top_10.style.format({'mkt_val':"{:,.2f}", 'allocation_pct':"{:.2f}%"}), use_container_width=True, hide_index=True)
 
             st.divider()
             
             # --- MAIN SORTABLE TABLE ---
             st.subheader(f"📋 All {market_name} Shares")
-            disp = subset[['symbol', 'sector', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']].copy()
+            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']].copy()
             
             styled_df = disp.style.format({
                 'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 
@@ -178,7 +177,6 @@ if not df.empty:
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
                 st.metric("Total Global Value", f"£{total_gbp:,.2f}")
-                st.info("Donut chart shows weightage of each market in your total net worth.")
 
     with t_set:
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
