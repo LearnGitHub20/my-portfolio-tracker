@@ -52,20 +52,28 @@ if st.sidebar.button("Force Refresh All Data"):
     st.cache_data.clear()
     st.rerun()
 
-# --- DATA HELPERS ---
+# --- DATA HELPERS (WITH DUPLICATE CONSOLIDATION) ---
 def load_data():
     if not os.path.exists(DB_FILE): return pd.DataFrame()
     try:
         df = pd.read_csv(DB_FILE, on_bad_lines='skip', engine='python')
         df.columns = [str(c).strip().lower() for c in df.columns]
+        
         mapping = {'symbol':['symbol','ticker'], 'qty':['qty','quantity'], 'avg_price':['price','avg','cost']}
         inv_map = {col: target for target, aliases in mapping.items() for col in df.columns if any(a in col for a in aliases)}
         df = df.rename(columns=inv_map)
+        
         if 'symbol' in df.columns:
             df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
             df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
             df['avg_price'] = pd.to_numeric(df['avg_price'], errors='coerce').fillna(0)
-            return df[['symbol', 'qty', 'avg_price']].dropna(subset=['symbol'])
+            
+            # Consolidate Duplicates with Weighted Average Price
+            df['total_cost'] = df['qty'] * df['avg_price']
+            grouped = df.groupby('symbol').agg({'qty': 'sum', 'total_cost': 'sum'}).reset_index()
+            grouped['avg_price'] = (grouped['total_cost'] / grouped['qty']).fillna(0)
+            
+            return grouped[['symbol', 'qty', 'avg_price']].dropna(subset=['symbol'])
     except: return pd.DataFrame()
 
 def save_history(total_val, curr_code):
@@ -140,20 +148,19 @@ if df is not None and not df.empty:
             disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
             st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
             
-            # 3. TOTAL RETURNS SUMMARY (BOTTOM)
-            st.subheader(f"📈 {market_name} Portfolio Summary")
-            total_invested = subset['buy_price'].sum()
-            total_value = subset['mkt_val'].sum()
+            # 3. REGIONAL SUMMARY (BOTTOM)
+            total_inv = subset['buy_price'].sum()
+            total_val = subset['mkt_val'].sum()
             total_gain = subset['gain_val'].sum()
-            total_return_pct = (total_gain / total_invested * 100) if total_invested != 0 else 0
+            ret_pct = (total_gain / total_inv * 100) if total_inv != 0 else 0
             
+            st.subheader(f"📊 {market_name} Performance Summary")
             st.table(pd.DataFrame([{
-                'Total Invested': f"{cur_sym}{total_invested:,.2f}",
-                'Current Value': f"{cur_sym}{total_value:,.2f}",
+                'Total Invested': f"{cur_sym}{total_inv:,.2f}",
+                'Current Value': f"{cur_sym}{total_val:,.2f}",
                 'Net Gain/Loss': f"{cur_sym}{total_gain:,.2f}",
-                'Total Return': f"{total_return_pct:.2f}%"
+                'Total Return': f"{ret_pct:.2f}%"
             }]))
-            
             return subset
 
     for i, name in enumerate(["India", "US", "London", "Europe"]):
@@ -168,48 +175,38 @@ if df is not None and not df.empty:
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
             rates[display_curr] = 1.0
-        except: 
-            rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
+        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
 
         summary_rows = []
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
                 m_curr = m_df['curr_code'].iloc[0]
-                m_sym = m_df['curr_sym'].iloc[0]
                 local_val = m_df['mkt_val'].sum()
                 conv_val = local_val / rates[m_curr]
-                summary_rows.append({
-                    "Market": m_name,
-                    "Currency": m_sym,
-                    "Market Value (Local)": local_val,
-                    f"Value ({display_curr})": conv_val
-                })
+                summary_rows.append({"Market": m_name, "Currency": m_df['curr_sym'].iloc[0], "Market Value (Local)": local_val, f"Value ({display_curr})": conv_val})
         
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
             total_global = sum_df[f"Value ({display_curr})"].sum()
             sum_df['Allocation %'] = (sum_df[f"Value ({display_curr})"] / total_global * 100)
             
-            st.subheader("📊 Global Asset Distribution")
+            st.subheader("🌍 Global Asset Distribution")
             st.dataframe(sum_df.style.format({'Market Value (Local)': "{:,.2f}", f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
             st.divider()
             c1, c2 = st.columns(2)
             with c1:
-                st.metric("Total Global Value", f"{curr_icons[display_curr]}{total_global:,.2f}")
-                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Asset Allocation"), use_container_width=True)
+                st.metric("Total Portfolio Value", f"{curr_icons[display_curr]}{total_global:,.2f}")
+                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Global Allocation"), use_container_width=True)
             with c2:
                 if os.path.exists(HIST_FILE):
                     h_df = pd.read_csv(HIST_FILE)
                     h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
                     match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
                     if len(match_h) > 1:
-                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Portfolio History ({display_curr})"), use_container_width=True)
+                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Value History ({display_curr})"), use_container_width=True)
             
             save_history(total_global, display_curr)
-
-else:
-    st.info("Please upload your portfolio_db.csv in the Settings tab.")
 
 with tabs[5]:
     st.header("Settings")
@@ -217,3 +214,6 @@ with tabs[5]:
     if uploaded:
         with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
         st.success("File uploaded! Please refresh.")
+    if st.button("Clear History"):
+        if os.path.exists(HIST_FILE): os.remove(HIST_FILE)
+        st.rerun()
