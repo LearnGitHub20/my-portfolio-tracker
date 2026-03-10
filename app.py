@@ -13,11 +13,10 @@ st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon=
 # --- SIDEBAR: GLOBAL INDICES ---
 st.sidebar.header("🌍 Market Indices")
 
-@st.cache_data(ttl=3600)  # Caches index data for 1 hour
+@st.cache_data(ttl=3600)
 def fetch_indices():
     indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
     try:
-        # threads=False is critical for stability on Streamlit Cloud
         data = yf.download(list(indices.keys()), period="2d", interval="1d", progress=False, threads=False)['Close']
         results = []
         for ticker, name in indices.items():
@@ -35,8 +34,6 @@ if index_data:
     for i, idx in enumerate(index_data):
         target_col = c1 if i % 2 == 0 else c2
         target_col.metric(idx['name'], f"{idx['price']:,.0f}", f"{idx['change']:+.2f}%")
-else:
-    st.sidebar.warning("Indices currently unavailable")
 
 st.sidebar.divider()
 
@@ -128,79 +125,17 @@ if df is not None and not df.empty:
             subset['mkt_val'] = subset['qty'] * subset['ltp']
             subset['gain_val'] = subset['mkt_val'] - subset['buy_price']
             subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
-            
             cur_sym = str(subset['curr_sym'].iloc[0])
-            st.subheader(f"📋 {market_name} Holdings")
-            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
-            st.dataframe(disp.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
-            return subset
 
-    for i, name in enumerate(["India", "US", "London", "Europe"]):
-        regional_data[name] = render_market(name, tabs[i+1])
-
-    # --- SUMMARY TAB ---
-    with tabs[0]:
-        st.header(f"Total Portfolio Analysis ({display_curr})")
-        
-        try:
-            # Fetch conversion rates
-            pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
-            fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
-            rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
-            rates[display_curr] = 1.0
-        except: 
-            rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
-
-        summary_rows = []
-        for m_name, m_df in regional_data.items():
-            if m_df is not None and not m_df.empty:
-                m_curr = m_df['curr_code'].iloc[0]
-                m_sym = m_df['curr_sym'].iloc[0]
-                local_val = m_df['mkt_val'].sum()
-                conv_val = local_val / rates[m_curr]
-                summary_rows.append({
-                    "Market": m_name,
-                    "Currency": m_sym,
-                    "Market Value (Local)": local_val,
-                    f"Value ({display_curr})": conv_val
-                })
-        
-        if summary_rows:
-            sum_df = pd.DataFrame(summary_rows)
-            total_global = sum_df[f"Value ({display_curr})"].sum()
-            sum_df['Allocation %'] = (sum_df[f"Value ({display_curr})"] / total_global * 100)
-            
-            # GLOBAL ASSET DISTRIBUTION TABLE
-            st.subheader("📊 Global Asset Distribution")
-            st.dataframe(
-                sum_df.style.format({
-                    'Market Value (Local)': "{:,.2f}",
-                    f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}",
-                    'Allocation %': "{:.2f}%"
-                }), 
-                use_container_width=True, hide_index=True
-            )
+            # 1. TOP 10 HOLDINGS
+            st.subheader(f"🔝 Top 10 {market_name} Holdings")
+            subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
+            top_10 = subset.nlargest(10, 'alloc_pct')[['symbol', 'mkt_val', 'alloc_pct']]
+            st.dataframe(top_10.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'alloc_pct': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
             st.divider()
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("Total Net Worth", f"{curr_icons[display_curr]}{total_global:,.2f}")
-                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Global Allocation"), use_container_width=True)
-            with c2:
-                if os.path.exists(HIST_FILE):
-                    h_df = pd.read_csv(HIST_FILE)
-                    h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
-                    match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
-                    if len(match_h) > 1:
-                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Value History ({display_curr})"), use_container_width=True)
             
-            save_history(total_global, display_curr)
-else:
-    st.info("Upload your portfolio_db.csv in the Settings tab.")
-
-with tabs[5]:
-    st.header("Settings")
-    uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
-    if uploaded:
-        with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
-        st.success("File uploaded! Please refresh.")
+            # 2. ALL SHARES
+            st.subheader(f"📋 All {market_name} Shares")
+            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
+            st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2
