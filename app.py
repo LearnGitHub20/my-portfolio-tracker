@@ -13,10 +13,11 @@ st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon=
 # --- SIDEBAR: GLOBAL INDICES ---
 st.sidebar.header("🌍 Market Indices")
 
-@st.cache_data(ttl=3600)  # Refresh every hour
+@st.cache_data(ttl=3600)
 def fetch_indices():
     indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
     try:
+        # threads=False is critical for stability
         data = yf.download(list(indices.keys()), period="2d", interval="1d", progress=False, threads=False)['Close']
         results = []
         for ticker, name in indices.items():
@@ -34,8 +35,6 @@ if index_data:
     for i, idx in enumerate(index_data):
         target_col = c1 if i % 2 == 0 else c2
         target_col.metric(idx['name'], f"{idx['price']:,.0f}", f"{idx['change']:+.2f}%")
-else:
-    st.sidebar.warning("Indices unavailable")
 
 st.sidebar.divider()
 
@@ -126,21 +125,12 @@ if df is not None and not df.empty:
             subset['buy_price'] = subset['qty'] * subset['avg_price']
             subset['mkt_val'] = subset['qty'] * subset['ltp']
             subset['gain_val'] = subset['mkt_val'] - subset['buy_price']
-            subset['gain_pct'] = (subset['gain_val'] / subset['buy_price'] * 100).fillna(0)
             subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
             
             cur_sym = str(subset['curr_sym'].iloc[0])
-
-            st.subheader(f"🔝 Top 10 {market_name} Holdings")
-            subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
-            top_10 = subset.nlargest(10, 'alloc_pct')[['symbol', 'mkt_val', 'alloc_pct']]
-            top_10_total = pd.DataFrame([['**TOTAL**', top_10['mkt_val'].sum(), top_10['alloc_pct'].sum()]], columns=['symbol', 'mkt_val', 'alloc_pct'])
-            st.dataframe(pd.concat([top_10, top_10_total]).style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'alloc_pct': "{:.2f}%"}), use_container_width=True, hide_index=True)
-
-            st.divider()
-            st.subheader("📋 All Shares")
-            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'gain_pct', 'day_pct']]
-            st.dataframe(disp.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_pct':"{:.2f}%", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
+            st.subheader(f"📋 {market_name} Holdings")
+            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
+            st.dataframe(disp.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
             return subset
 
     for i, name in enumerate(["India", "US", "London", "Europe"]):
@@ -151,25 +141,48 @@ if df is not None and not df.empty:
         st.header(f"Total Portfolio Analysis ({display_curr})")
         
         try:
+            # Fetch FX rates relative to display currency
             pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
             rates[display_curr] = 1.0
-        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
+        except: 
+            rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
 
         summary_rows = []
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
-                val_conv = m_df['mkt_val'].sum() / rates[m_df['curr_code'].iloc[0]]
-                summary_rows.append({"Market": m_name, f"Value ({display_curr})": val_conv})
+                m_curr = m_df['curr_code'].iloc[0]
+                m_sym = m_df['curr_sym'].iloc[0]
+                local_val = m_df['mkt_val'].sum()
+                conv_val = local_val / rates[m_curr]
+                summary_rows.append({
+                    "Market": m_name,
+                    "Currency": m_sym,
+                    "Market Value (Local)": local_val,
+                    f"Value ({display_curr})": conv_val
+                })
         
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
-            total_val = sum_df[f"Value ({display_curr})"].sum()
+            total_global = sum_df[f"Value ({display_curr})"].sum()
+            sum_df['Allocation %'] = (sum_df[f"Value ({display_curr})"] / total_global * 100)
             
+            # Restored Summary Table
+            st.subheader("📊 Global Asset Distribution")
+            st.dataframe(
+                sum_df.style.format({
+                    'Market Value (Local)': "{:,.2f}",
+                    f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}",
+                    'Allocation %': "{:.2f}%"
+                }), 
+                use_container_width=True, hide_index=True
+            )
+
+            st.divider()
             c1, c2 = st.columns(2)
             with c1:
-                st.metric("Total Net Worth", f"{curr_icons[display_curr]}{total_val:,.2f}")
+                st.metric("Total Net Worth", f"{curr_icons[display_curr]}{total_global:,.2f}")
                 st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Global Allocation"), use_container_width=True)
             with c2:
                 if os.path.exists(HIST_FILE):
@@ -179,7 +192,7 @@ if df is not None and not df.empty:
                     if len(match_h) > 1:
                         st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Value History ({display_curr})"), use_container_width=True)
             
-            save_history(total_val, display_curr)
+            save_history(total_global, display_curr)
 
 else:
     st.info("Upload your portfolio_db.csv in the Settings tab.")
