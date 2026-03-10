@@ -65,7 +65,7 @@ st.sidebar.divider()
 st.sidebar.header("🔍 Controls")
 if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
-st.session_state.search_query = st.sidebar.text_input("Search Symbol", value=st.session_state.search_query).upper()
+st.session_state.search_query = st.sidebar.text_input("Search Company/Symbol", value=st.session_state.search_query).upper()
 
 st.sidebar.header("💱 Display Currency")
 display_curr = st.sidebar.selectbox("Show Summary In:", ["GBP", "USD", "INR", "EUR", "CHF"], index=0)
@@ -135,16 +135,29 @@ if df is not None and not df.empty:
         tickers = subset['symbol'].tolist()
         fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
         
-        with st.status(f"Updating {market_name} Prices...", expanded=False):
+        with st.status(f"Updating {market_name} Data...", expanded=False):
+            # Fetch prices
             data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
+            
+            # Fetch names using Tickers object (more efficient)
+            y_tickers = yf.Tickers(" ".join(fetch_list))
+            name_map = {}
+            for t in fetch_list:
+                try:
+                    # Tries to get the short name, falls back to ticker if error
+                    name_map[t] = y_tickers.tickers[t].info.get('shortName', t)
+                except:
+                    name_map[t] = t
+
             def get_p(sym):
                 try:
                     t = sym if ('.' in sym or market_name != "India") else f"{sym}.NS"
                     v = data[t] if len(fetch_list) > 1 else data
-                    return float(v.iloc[-1]), float(v.iloc[-2])
-                except: return 0.0, 0.0
+                    return float(v.iloc[-1]), float(v.iloc[-2]), name_map[t]
+                except: return 0.0, 0.0, sym
+
             prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
-            subset['ltp'], subset['prev'] = prices[0].fillna(0), prices[1].fillna(0)
+            subset['ltp'], subset['prev'], subset['company'] = prices[0].fillna(0), prices[1].fillna(0), prices[2]
 
         subset['buy_price'] = subset['qty'] * subset['avg_price']
         subset['mkt_val'] = subset['qty'] * subset['ltp']
@@ -154,12 +167,12 @@ if df is not None and not df.empty:
 
         st.subheader(f"🔝 Top 10 {market_name} Holdings")
         subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
-        top_10 = subset.nlargest(10, 'alloc_pct')[['symbol', 'mkt_val', 'alloc_pct']]
+        top_10 = subset.nlargest(10, 'alloc_pct')[['company', 'mkt_val', 'alloc_pct']]
         st.dataframe(top_10.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'alloc_pct': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader(f"📋 All {market_name} Shares")
-        disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
+        disp = subset[['company', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
         st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
         
         st.table(pd.DataFrame([{
@@ -174,7 +187,6 @@ if df is not None and not df.empty:
     if active_tab == "📊 Summary":
         st.header(f"Global Portfolio Summary ({display_curr})")
         regional_results = {}
-        # Fetch all markets including Switzerland
         for m in ["India", "US", "London", "Europe", "Switzerland"]:
             subset_m = filtered_df[filtered_df['market'] == m].copy()
             if not subset_m.empty:
@@ -191,7 +203,6 @@ if df is not None and not df.empty:
                 regional_results[m] = subset_m
 
         try:
-            # Added CHF to conversion logic
             pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR", "CHF"] if c != display_curr]
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR", "CHF"]}
