@@ -11,13 +11,13 @@ HIST_FILE = "history_db.csv"
 st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon="🌍")
 
 # --- NAVIGATION LOGIC ---
-# This dictionary maps the display names to internal keys
 NAV_OPTIONS = {
     "📊 Summary": "Summary",
     "🇮🇳 India": "India",
     "🇺🇸 US": "US",
     "🇬🇧 London": "London",
     "🇪🇺 Europe": "Europe",
+    "🇨🇭 Switzerland": "Switzerland",
     "⚙️ Settings": "Settings"
 }
 
@@ -29,7 +29,7 @@ st.sidebar.header("🌍 Market Indices")
 
 @st.cache_data(ttl=3600)
 def fetch_indices():
-    indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
+    indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^FTSE": "FTSE 100", "^SSMI": "SMI (Swiss)"}
     try:
         data = yf.download(list(indices.keys()), period="2d", interval="1d", progress=False, threads=False)['Close']
         results = []
@@ -51,13 +51,11 @@ if index_data:
 
 st.sidebar.divider()
 
-# --- SIDEBAR: NAVIGATION LINKS (FIXED) ---
+# --- SIDEBAR: NAVIGATION LINKS ---
 st.sidebar.header("📍 Quick Navigation")
-
 def set_tab(name):
     st.session_state.active_tab = name
 
-# Create buttons that update the session state
 for label in NAV_OPTIONS.keys():
     st.sidebar.button(label, on_click=set_tab, args=(label,), use_container_width=True)
 
@@ -67,12 +65,11 @@ st.sidebar.divider()
 st.sidebar.header("🔍 Controls")
 if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
-
 st.session_state.search_query = st.sidebar.text_input("Search Symbol", value=st.session_state.search_query).upper()
 
 st.sidebar.header("💱 Display Currency")
-display_curr = st.sidebar.selectbox("Show Summary In:", ["GBP", "USD", "INR", "EUR"], index=0)
-curr_icons = {"GBP": "£", "USD": "$", "INR": "₹", "EUR": "€"}
+display_curr = st.sidebar.selectbox("Show Summary In:", ["GBP", "USD", "INR", "EUR", "CHF"], index=0)
+curr_icons = {"GBP": "£", "USD": "$", "INR": "₹", "EUR": "€", "CHF": "Fr."}
 
 if st.sidebar.button("Force Refresh All Data"):
     st.cache_data.clear()
@@ -91,7 +88,6 @@ def load_data():
             df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
             df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
             df['avg_price'] = pd.to_numeric(df['avg_price'], errors='coerce').fillna(0)
-            
             df['total_cost'] = df['qty'] * df['avg_price']
             grouped = df.groupby('symbol').agg({'qty': 'sum', 'total_cost': 'sum'}).reset_index()
             grouped['avg_price'] = (grouped['total_cost'] / grouped['qty']).fillna(0)
@@ -108,6 +104,7 @@ def save_history(total_val, curr_code):
 
 def get_market_label(symbol):
     s = str(symbol).upper()
+    if s.endswith('.SW'): return "Switzerland", "Fr.", "CHF"
     if s.endswith('.L'): return "London", "£", "GBP"
     if any(s.endswith(ext) for ext in ['.PA', '.DE', '.AS', '.MI', '.MC']): return "Europe", "€", "EUR"
     if s.endswith('.NS') or s.endswith('.BO'): return "India", "₹", "INR"
@@ -127,7 +124,6 @@ if df is not None and not df.empty:
     details = filtered_df['symbol'].apply(lambda x: pd.Series(get_market_label(x)))
     filtered_df[['market', 'curr_sym', 'curr_code']] = details
 
-    # Determine Active Tab content
     active_tab = st.session_state.active_tab
 
     def render_market_view(market_name):
@@ -177,10 +173,9 @@ if df is not None and not df.empty:
     # --- ROUTING ENGINE ---
     if active_tab == "📊 Summary":
         st.header(f"Global Portfolio Summary ({display_curr})")
-        # Pre-fetch all regional data for summary calculation
         regional_results = {}
-        for m in ["India", "US", "London", "Europe"]:
-            # Logic here is stripped down for the summary tab to avoid double rendering
+        # Fetch all markets including Switzerland
+        for m in ["India", "US", "London", "Europe", "Switzerland"]:
             subset_m = filtered_df[filtered_df['market'] == m].copy()
             if not subset_m.empty:
                 tickers_m = subset_m['symbol'].tolist()
@@ -196,11 +191,12 @@ if df is not None and not df.empty:
                 regional_results[m] = subset_m
 
         try:
-            pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
+            # Added CHF to conversion logic
+            pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR", "CHF"] if c != display_curr]
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
-            rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
+            rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR", "CHF"]}
             rates[display_curr] = 1.0
-        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
+        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0, "CHF": 1.10}
 
         summary_rows = []
         for m_name, m_df in regional_results.items():
@@ -229,6 +225,8 @@ if df is not None and not df.empty:
                         st.plotly_chart(px.line(match_h, x="Timestamp", y="Value"), use_container_width=True)
             save_history(total_global, display_curr)
 
+    elif active_tab == "🇨🇭 Switzerland":
+        render_market_view("Switzerland")
     elif active_tab == "🇮🇳 India":
         render_market_view("India")
     elif active_tab == "🇺🇸 US":
@@ -246,6 +244,5 @@ if df is not None and not df.empty:
         if st.button("Clear History"):
             if os.path.exists(HIST_FILE): os.remove(HIST_FILE)
             st.rerun()
-
 else:
     st.info("Upload your portfolio_db.csv in the Settings tab to begin.")
