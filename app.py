@@ -138,4 +138,82 @@ if df is not None and not df.empty:
             # 2. ALL SHARES
             st.subheader(f"📋 All {market_name} Shares")
             disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
-            st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2
+            st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
+            
+            # 3. TOTAL RETURNS SUMMARY (BOTTOM)
+            st.subheader(f"📈 {market_name} Portfolio Summary")
+            total_invested = subset['buy_price'].sum()
+            total_value = subset['mkt_val'].sum()
+            total_gain = subset['gain_val'].sum()
+            total_return_pct = (total_gain / total_invested * 100) if total_invested != 0 else 0
+            
+            st.table(pd.DataFrame([{
+                'Total Invested': f"{cur_sym}{total_invested:,.2f}",
+                'Current Value': f"{cur_sym}{total_value:,.2f}",
+                'Net Gain/Loss': f"{cur_sym}{total_gain:,.2f}",
+                'Total Return': f"{total_return_pct:.2f}%"
+            }]))
+            
+            return subset
+
+    for i, name in enumerate(["India", "US", "London", "Europe"]):
+        regional_data[name] = render_market(name, tabs[i+1])
+
+    # --- SUMMARY TAB ---
+    with tabs[0]:
+        st.header(f"Global Portfolio Summary ({display_curr})")
+        
+        try:
+            pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
+            fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
+            rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
+            rates[display_curr] = 1.0
+        except: 
+            rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
+
+        summary_rows = []
+        for m_name, m_df in regional_data.items():
+            if m_df is not None and not m_df.empty:
+                m_curr = m_df['curr_code'].iloc[0]
+                m_sym = m_df['curr_sym'].iloc[0]
+                local_val = m_df['mkt_val'].sum()
+                conv_val = local_val / rates[m_curr]
+                summary_rows.append({
+                    "Market": m_name,
+                    "Currency": m_sym,
+                    "Market Value (Local)": local_val,
+                    f"Value ({display_curr})": conv_val
+                })
+        
+        if summary_rows:
+            sum_df = pd.DataFrame(summary_rows)
+            total_global = sum_df[f"Value ({display_curr})"].sum()
+            sum_df['Allocation %'] = (sum_df[f"Value ({display_curr})"] / total_global * 100)
+            
+            st.subheader("📊 Global Asset Distribution")
+            st.dataframe(sum_df.style.format({'Market Value (Local)': "{:,.2f}", f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Total Global Value", f"{curr_icons[display_curr]}{total_global:,.2f}")
+                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Asset Allocation"), use_container_width=True)
+            with c2:
+                if os.path.exists(HIST_FILE):
+                    h_df = pd.read_csv(HIST_FILE)
+                    h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
+                    match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
+                    if len(match_h) > 1:
+                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Portfolio History ({display_curr})"), use_container_width=True)
+            
+            save_history(total_global, display_curr)
+
+else:
+    st.info("Please upload your portfolio_db.csv in the Settings tab.")
+
+with tabs[5]:
+    st.header("Settings")
+    uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
+    if uploaded:
+        with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
+        st.success("File uploaded! Please refresh.")
