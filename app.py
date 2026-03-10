@@ -3,10 +3,15 @@ import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import os
+from datetime import datetime
 
 # --- INITIAL SETUP ---
 DB_FILE = "portfolio_db.csv"
+HIST_FILE = "history_db.csv"
 st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon="🌍")
+
+if 'search_query' not in st.session_state:
+    st.session_state.search_query = ""
 
 def load_data():
     if not os.path.exists(DB_FILE):
@@ -14,15 +19,9 @@ def load_data():
     try:
         df = pd.read_csv(DB_FILE, on_bad_lines='skip', engine='python')
         df.columns = [str(c).strip().lower() for c in df.columns]
-        # Removed sector from mapping
-        mapping = {
-            'symbol':['symbol','ticker'], 
-            'qty':['qty','quantity'], 
-            'avg_price':['price','avg','cost']
-        }
+        mapping = {'symbol':['symbol','ticker'], 'qty':['qty','quantity'], 'avg_price':['price','avg','cost']}
         inv_map = {col: target for target, aliases in mapping.items() for col in df.columns if any(a in col for a in aliases)}
         df = df.rename(columns=inv_map)
-        
         if 'symbol' in df.columns:
             df['symbol'] = df['symbol'].astype(str).str.upper().str.strip()
             df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
@@ -30,6 +29,15 @@ def load_data():
             return df[['symbol', 'qty', 'avg_price']].dropna(subset=['symbol'])
     except: return pd.DataFrame()
     return pd.DataFrame()
+
+def save_history(total_gbp):
+    """Saves the current total value to a CSV for historical tracking."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    new_entry = pd.DataFrame([[now, total_gbp]], columns=["Timestamp", "Total_Value_GBP"])
+    if not os.path.exists(HIST_FILE):
+        new_entry.to_csv(HIST_FILE, index=False)
+    else:
+        new_entry.to_csv(HIST_FILE, mode='a', header=False, index=False)
 
 def get_market_label(symbol):
     s = str(symbol).upper()
@@ -44,33 +52,39 @@ def style_gains(val):
         return f'color: {color}'
     return ''
 
-# --- UI ---
-st.title("🌍 Global Multi-Market Tracker")
+# --- SIDEBAR ---
+st.sidebar.header("🔍 Controls")
+st.session_state.search_query = st.sidebar.text_input("Search Symbol", value=st.session_state.search_query).upper()
 
 if st.sidebar.button("Force Global Refresh"):
     st.cache_data.clear()
     st.rerun()
 
+if st.sidebar.button("Clear Search"):
+    st.session_state.search_query = ""
+    st.rerun()
+
 df = load_data()
 
 if not df.empty:
-    details = df['symbol'].apply(lambda x: pd.Series(get_market_label(x)))
-    df[['market', 'curr_sym', 'curr_code']] = details
+    filtered_df = df[df['symbol'].str.contains(st.session_state.search_query)] if st.session_state.search_query else df
+    details = filtered_df['symbol'].apply(lambda x: pd.Series(get_market_label(x)))
+    filtered_df[['market', 'curr_sym', 'curr_code']] = details
 
-    t_sum, t_in, t_us, t_lon, t_eu, t_set = st.tabs(["📊 Summary", "🇮🇳 India", "🇺🇸 US", "🇬🇧 London", "🇪🇺 Europe", "⚙️ Settings"])
+    tabs = st.tabs(["📊 Summary", "🇮🇳 India", "🇺🇸 US", "🇬🇧 London", "🇪🇺 Europe", "⚙️ Settings"])
     regional_data = {}
 
     def render_market(market_name, tab_obj):
-        subset = df[df['market'] == market_name].copy()
+        subset = filtered_df[filtered_df['market'] == market_name].copy()
         with tab_obj:
             if subset.empty:
-                st.info(f"No holdings listed for {market_name}.")
+                st.info(f"No holdings for {market_name}.")
                 return None
             
             tickers = subset['symbol'].tolist()
             fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
             
-            with st.status(f"Updating {market_name} Prices...", expanded=False):
+            with st.status(f"Updating {market_name}...", expanded=False):
                 data = yf.download(fetch_list, period="2d", progress=False)['Close']
                 def get_p(sym):
                     try:
@@ -78,110 +92,75 @@ if not df.empty:
                         v = data[t] if len(fetch_list) > 1 else data
                         return float(v.iloc[-1]), float(v.iloc[-2])
                     except: return 0.0, 0.0
-                
                 prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
-                subset['ltp'] = prices[0].fillna(0)
-                subset['prev'] = prices[1].fillna(0)
+                subset['ltp'], subset['prev'] = prices[0].fillna(0), prices[1].fillna(0)
 
-            # --- CALCULATIONS ---
             subset['buy_price'] = subset['qty'] * subset['avg_price']
             subset['mkt_val'] = subset['qty'] * subset['ltp']
             subset['gain_loss_val'] = subset['mkt_val'] - subset['buy_price']
-            subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
-            subset['day_gain_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+            subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).fillna(0)
+            subset['day_gain_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
             
-            # --- TOP 10 HOLDINGS BY ALLOCATION ---
-            total_mkt_val = subset['mkt_val'].sum()
-            subset['allocation_pct'] = (subset['mkt_val'] / total_mkt_val * 100) if total_mkt_val != 0 else 0
-            
-            st.subheader(f"🔝 Top 10 {market_name} Holdings")
-            top_10 = subset.nlargest(10, 'allocation_pct')[['symbol', 'mkt_val', 'allocation_pct']]
-            st.dataframe(top_10.style.format({'mkt_val':"{:,.2f}", 'allocation_pct':"{:.2f}%"}), use_container_width=True, hide_index=True)
+            # Top 10
+            st.subheader(f"🔝 Top 10 {market_name}")
+            subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
+            top_10 = subset.nlargest(10, 'alloc_pct')[['symbol', 'mkt_val', 'alloc_pct']]
+            top_10_total = pd.DataFrame([['TOP 10 TOTAL', top_10['mkt_val'].sum(), top_10['alloc_pct'].sum()]], columns=top_10.columns)
+            st.dataframe(pd.concat([top_10, top_10_total]), use_container_width=True, hide_index=True)
 
-            st.divider()
-            
-            # --- MAIN SORTABLE TABLE ---
-            st.subheader(f"📋 All {market_name} Shares")
-            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']].copy()
-            
-            styled_df = disp.style.format({
-                'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val':"{:,.2f}", 
-                'buy_price':"{:,.2f}", 'gain_loss_val':"{:,.2f}", 
-                'gain_loss_pct':"{:.2f}%", 'day_gain_pct':"{:.2f}%"
-            }).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain_pct'])
-            
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            # All Shares
+            st.subheader("📋 All Shares")
+            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'buy_price', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']]
+            st.dataframe(disp.style.format({'mkt_val':"{:,.2f}", 'gain_loss_pct':"{:.2f}%", 'day_gain_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_loss_val', 'gain_loss_pct', 'day_gain_pct']), use_container_width=True, hide_index=True)
 
-            # --- PINNED TOTALS (SAFE FROM SORTING) ---
-            st.markdown(f"### 🎯 {market_name} Totals")
-            totals_df = pd.DataFrame([{
-                'Market': 'TOTAL Portfolio',
-                'Invested': subset['buy_price'].sum(),
-                'Current Value': subset['mkt_val'].sum(),
-                'Net Gain/Loss': subset['gain_loss_val'].sum(),
-                'Net Return %': (subset['gain_loss_val'].sum() / subset['buy_price'].sum() * 100) if subset['buy_price'].sum() != 0 else 0
-            }])
-            
+            # Pinned Totals
             cur_sym = str(subset['curr_sym'].iloc[0])
-            st.table(totals_df.style.format({
-                'Invested': f"{cur_sym}{{:.2f}}", 
-                'Current Value': f"{cur_sym}{{:.2f}}", 
-                'Net Gain/Loss': f"{cur_sym}{{:.2f}}", 
-                'Net Return %': "{:.2f}%"
-            }).applymap(style_gains, subset=['Net Gain/Loss', 'Net Return %']))
-            
+            st.table(pd.DataFrame([{'Invested': f"{cur_sym}{subset['buy_price'].sum():,.2f}", 'Value': f"{cur_sym}{subset['mkt_val'].sum():,.2f}", 'Return': f"{subset['gain_loss_pct'].mean():.2f}%"}]))
             return subset
 
-    # Rendering Tabs
-    regional_data["India"] = render_market("India", t_in)
-    regional_data["US"] = render_market("US", t_us)
-    regional_data["London"] = render_market("London", t_lon)
-    regional_data["Europe"] = render_market("Europe", t_eu)
+    # Populate Regions
+    for i, name in enumerate(["India", "US", "London", "Europe"]):
+        regional_data[name] = render_market(name, tabs[i+1])
 
     # --- SUMMARY TAB ---
-    with t_sum:
+    with tabs[0]:
         st.header("Global Portfolio Summary")
         try:
-            rates_df = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
-            rates = {"USD": rates_df["GBPUSD=X"].iloc[-1], "INR": rates_df["GBPINR=X"].iloc[-1], "EUR": rates_df["GBPEUR=X"].iloc[-1], "GBP": 1.0}
-        except:
-            rates = {"USD": 1.3, "INR": 105.0, "EUR": 1.18, "GBP": 1.0}
+            fx = yf.download(["GBPUSD=X", "GBPINR=X", "GBPEUR=X"], period="1d", progress=False)['Close']
+            rates = {"USD": fx["GBPUSD=X"].iloc[-1], "INR": fx["GBPINR=X"].iloc[-1], "EUR": fx["GBPEUR=X"].iloc[-1], "GBP": 1.0}
+        except: rates = {"USD": 1.3, "INR": 105.0, "EUR": 1.18, "GBP": 1.0}
 
         summary_rows = []
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
-                code = m_df['curr_code'].iloc[0]
-                sym = m_df['curr_sym'].iloc[0]
-                inv_local = m_df['buy_price'].sum()
-                mkt_local = m_df['mkt_val'].sum()
-                mkt_gbp = mkt_local / rates[code]
-                summary_rows.append({
-                    "Market": m_name, "Currency": sym, "Invested (Local)": inv_local,
-                    "Market Value (Local)": mkt_local, "Market Value (£)": mkt_gbp
-                })
-
+                mkt_gbp = m_df['mkt_val'].sum() / rates[m_df['curr_code'].iloc[0]]
+                summary_rows.append({"Market": m_name, "Market Value (£)": mkt_gbp})
+        
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
             total_gbp = sum_df['Market Value (£)'].sum()
-            sum_df['Allocation %'] = (sum_df['Market Value (£)'] / total_gbp * 100)
+            save_history(total_gbp) # AUTO-LOGGING
+
+            st.metric("Total Global Value", f"£{total_gbp:,.2f}")
             
-            st.dataframe(sum_df.style.format({
-                'Invested (Local)': "{:,.2f}", 'Market Value (Local)': "{:,.2f}", 
-                'Market Value (£)': "£{:,.2f}", 'Allocation %': "{:.2f}%"
-            }), use_container_width=True, hide_index=True)
+            # Line Chart for History
+            if os.path.exists(HIST_FILE):
+                hist_df = pd.read_csv(HIST_FILE)
+                if len(hist_df) > 1:
+                    st.subheader("📈 Total Value Over Time (GBP)")
+                    fig_line = px.line(hist_df, x="Timestamp", y="Total_Value_GBP", markers=True, template="plotly_dark")
+                    st.plotly_chart(fig_line, use_container_width=True)
+            
+            # Donut Chart
+            fig_pie = px.pie(sum_df, values='Market Value (£)', names='Market', hole=0.5, title="Market Allocation")
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-            st.divider()
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                fig = px.pie(sum_df, values='Market Value (£)', names='Market', hole=0.5, title="Global Asset Allocation (GBP)")
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                st.metric("Total Global Value", f"£{total_gbp:,.2f}")
-
-    with t_set:
+    with tabs[5]:
+        st.header("Settings")
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
         if uploaded:
             with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
-            st.success("File uploaded. Click Refresh.")
-else:
-    st.info("Portfolio empty. Upload CSV in Settings.")
+            st.success("Uploaded!")
+        if st.button("Reset History Data"):
+            if os.path.exists(HIST_FILE): os.remove(HIST_FILE)
+            st.rerun()
