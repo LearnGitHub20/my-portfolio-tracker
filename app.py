@@ -135,16 +135,14 @@ if df is not None and not df.empty:
         tickers = subset['symbol'].tolist()
         fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
         
-        with st.status(f"Fetching Market Data for {market_name}...", expanded=False):
+        with st.status(f"Updating {market_name} Data...", expanded=False):
             data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
             
             name_map = {}
             for t in fetch_list:
                 try:
                     ticker_obj = yf.Ticker(t)
-                    # Use longName if available, else shortName, else the Symbol
                     official_name = ticker_obj.info.get('longName') or ticker_obj.info.get('shortName') or t
-                    # Concat Name and original Ticker (without extra .NS or .L if you prefer, or just keep it)
                     name_map[t] = f"{official_name} ({t})"
                 except:
                     name_map[t] = t
@@ -165,13 +163,6 @@ if df is not None and not df.empty:
         subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
         cur_sym = str(subset['curr_sym'].iloc[0])
 
-        st.subheader(f"🔝 Top 10 {market_name} Holdings")
-        subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
-        top_10 = subset.nlargest(10, 'alloc_pct')[['display_name', 'mkt_val', 'alloc_pct']]
-        top_10.columns = ['Asset Name (Ticker)', 'Market Value', 'Allocation %']
-        st.dataframe(top_10.style.format({'Market Value': f"{cur_sym}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
-
-        st.divider()
         st.subheader(f"📋 {market_name} Portfolio")
         disp = subset[['display_name', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
         disp.columns = ['Asset Name (Ticker)', 'Shares', 'Avg Cost', 'LTP', 'Market Value', 'Net Gain', 'Day Change']
@@ -190,6 +181,25 @@ if df is not None and not df.empty:
             'Net Gain/Loss': f"{cur_sym}{subset['gain_val'].sum():,.2f}",
             'Total Return': f"{(subset['gain_val'].sum()/subset['buy_price'].sum()*100):.2f}%" if subset['buy_price'].sum() != 0 else "0.00%"
         }]))
+
+        # --- NEW SECTION: TOP GAINERS & LOSERS ---
+        st.divider()
+        st.subheader(f"🚀 {market_name} Daily Movers")
+        
+        col_g, col_l = st.columns(2)
+        
+        with col_g:
+            st.markdown("**Top 5 Gainers**")
+            gainers = subset.nlargest(5, 'day_pct')[['display_name', 'day_pct']]
+            gainers.columns = ['Asset', 'Day Change']
+            st.dataframe(gainers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
+            
+        with col_l:
+            st.markdown("**Top 5 Losers**")
+            losers = subset.nsmallest(5, 'day_pct')[['display_name', 'day_pct']]
+            losers.columns = ['Asset', 'Day Change']
+            st.dataframe(losers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
+            
         return subset
 
     # --- ROUTING ENGINE ---
