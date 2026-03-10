@@ -65,7 +65,7 @@ st.sidebar.divider()
 st.sidebar.header("🔍 Controls")
 if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
-st.session_state.search_query = st.sidebar.text_input("Search Company/Symbol", value=st.session_state.search_query).upper()
+st.session_state.search_query = st.sidebar.text_input("Search Company", value=st.session_state.search_query).upper()
 
 st.sidebar.header("💱 Display Currency")
 display_curr = st.sidebar.selectbox("Show Summary In:", ["GBP", "USD", "INR", "EUR", "CHF"], index=0)
@@ -135,17 +135,17 @@ if df is not None and not df.empty:
         tickers = subset['symbol'].tolist()
         fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
         
-        with st.status(f"Updating {market_name} Data...", expanded=False):
-            # Fetch prices
+        with st.status(f"Fetching Market Data for {market_name}...", expanded=False):
             data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
             
-            # Fetch names using Tickers object (more efficient)
-            y_tickers = yf.Tickers(" ".join(fetch_list))
             name_map = {}
             for t in fetch_list:
                 try:
-                    # Tries to get the short name, falls back to ticker if error
-                    name_map[t] = y_tickers.tickers[t].info.get('shortName', t)
+                    ticker_obj = yf.Ticker(t)
+                    # Use longName if available, else shortName, else the Symbol
+                    official_name = ticker_obj.info.get('longName') or ticker_obj.info.get('shortName') or t
+                    # Concat Name and original Ticker (without extra .NS or .L if you prefer, or just keep it)
+                    name_map[t] = f"{official_name} ({t})"
                 except:
                     name_map[t] = t
 
@@ -157,7 +157,7 @@ if df is not None and not df.empty:
                 except: return 0.0, 0.0, sym
 
             prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
-            subset['ltp'], subset['prev'], subset['company'] = prices[0].fillna(0), prices[1].fillna(0), prices[2]
+            subset['ltp'], subset['prev'], subset['display_name'] = prices[0].fillna(0), prices[1].fillna(0), prices[2]
 
         subset['buy_price'] = subset['qty'] * subset['avg_price']
         subset['mkt_val'] = subset['qty'] * subset['ltp']
@@ -167,13 +167,22 @@ if df is not None and not df.empty:
 
         st.subheader(f"🔝 Top 10 {market_name} Holdings")
         subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
-        top_10 = subset.nlargest(10, 'alloc_pct')[['company', 'mkt_val', 'alloc_pct']]
-        st.dataframe(top_10.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'alloc_pct': "{:.2f}%"}), use_container_width=True, hide_index=True)
+        top_10 = subset.nlargest(10, 'alloc_pct')[['display_name', 'mkt_val', 'alloc_pct']]
+        top_10.columns = ['Asset Name (Ticker)', 'Market Value', 'Allocation %']
+        st.dataframe(top_10.style.format({'Market Value': f"{cur_sym}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
         st.divider()
-        st.subheader(f"📋 All {market_name} Shares")
-        disp = subset[['company', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
-        st.dataframe(disp.style.format({'avg_price':"{:.2f}", 'ltp':"{:.2f}", 'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_val': f"{cur_sym}{{:,.2f}}", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
+        st.subheader(f"📋 {market_name} Portfolio")
+        disp = subset[['display_name', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
+        disp.columns = ['Asset Name (Ticker)', 'Shares', 'Avg Cost', 'LTP', 'Market Value', 'Net Gain', 'Day Change']
+        
+        st.dataframe(disp.style.format({
+            'Avg Cost':"{:.2f}", 
+            'LTP':"{:.2f}", 
+            'Market Value': f"{cur_sym}{{:,.2f}}", 
+            'Net Gain': f"{cur_sym}{{:,.2f}}", 
+            'Day Change':"{:.2f}%"
+        }).applymap(style_gains, subset=['Net Gain', 'Day Change']), use_container_width=True, hide_index=True)
         
         st.table(pd.DataFrame([{
             'Total Invested': f"{cur_sym}{subset['buy_price'].sum():,.2f}",
@@ -236,16 +245,11 @@ if df is not None and not df.empty:
                         st.plotly_chart(px.line(match_h, x="Timestamp", y="Value"), use_container_width=True)
             save_history(total_global, display_curr)
 
-    elif active_tab == "🇨🇭 Switzerland":
-        render_market_view("Switzerland")
-    elif active_tab == "🇮🇳 India":
-        render_market_view("India")
-    elif active_tab == "🇺🇸 US":
-        render_market_view("US")
-    elif active_tab == "🇬🇧 London":
-        render_market_view("London")
-    elif active_tab == "🇪🇺 Europe":
-        render_market_view("Europe")
+    elif active_tab == "🇨🇭 Switzerland": render_market_view("Switzerland")
+    elif active_tab == "🇮🇳 India": render_market_view("India")
+    elif active_tab == "🇺🇸 US": render_market_view("US")
+    elif active_tab == "🇬🇧 London": render_market_view("London")
+    elif active_tab == "🇪🇺 Europe": render_market_view("Europe")
     elif active_tab == "⚙️ Settings":
         st.header("⚙️ Settings")
         uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
