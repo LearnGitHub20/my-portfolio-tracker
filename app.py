@@ -13,11 +13,11 @@ st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon=
 # --- SIDEBAR: GLOBAL INDICES ---
 st.sidebar.header("🌍 Market Indices")
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)  # Caches index data for 1 hour
 def fetch_indices():
     indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
     try:
-        # threads=False is critical for stability
+        # threads=False is critical for stability on Streamlit Cloud
         data = yf.download(list(indices.keys()), period="2d", interval="1d", progress=False, threads=False)['Close']
         results = []
         for ticker, name in indices.items():
@@ -35,6 +35,8 @@ if index_data:
     for i, idx in enumerate(index_data):
         target_col = c1 if i % 2 == 0 else c2
         target_col.metric(idx['name'], f"{idx['price']:,.0f}", f"{idx['change']:+.2f}%")
+else:
+    st.sidebar.warning("Indices currently unavailable")
 
 st.sidebar.divider()
 
@@ -111,7 +113,7 @@ if df is not None and not df.empty:
             tickers = subset['symbol'].tolist()
             fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
             
-            with st.status(f"Fetching {market_name} Prices...", expanded=False):
+            with st.status(f"Updating {market_name} Prices...", expanded=False):
                 data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
                 def get_p(sym):
                     try:
@@ -141,7 +143,7 @@ if df is not None and not df.empty:
         st.header(f"Total Portfolio Analysis ({display_curr})")
         
         try:
-            # Fetch FX rates relative to display currency
+            # Fetch conversion rates
             pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
@@ -168,7 +170,7 @@ if df is not None and not df.empty:
             total_global = sum_df[f"Value ({display_curr})"].sum()
             sum_df['Allocation %'] = (sum_df[f"Value ({display_curr})"] / total_global * 100)
             
-            # Restored Summary Table
+            # GLOBAL ASSET DISTRIBUTION TABLE
             st.subheader("📊 Global Asset Distribution")
             st.dataframe(
                 sum_df.style.format({
@@ -193,7 +195,6 @@ if df is not None and not df.empty:
                         st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Value History ({display_curr})"), use_container_width=True)
             
             save_history(total_global, display_curr)
-
 else:
     st.info("Upload your portfolio_db.csv in the Settings tab.")
 
