@@ -163,7 +163,16 @@ if df is not None and not df.empty:
         subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
         cur_sym = str(subset['curr_sym'].iloc[0])
 
-        st.subheader(f"📋 {market_name} Portfolio")
+        # --- 1. TOP 10 ALLOCATION TABLE ---
+        st.subheader(f"🔝 Top 10 {market_name} Holdings")
+        subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
+        top_10 = subset.nlargest(10, 'alloc_pct')[['display_name', 'mkt_val', 'alloc_pct']]
+        top_10.columns = ['Asset Name (Ticker)', 'Market Value', 'Allocation %']
+        st.dataframe(top_10.style.format({'Market Value': f"{cur_sym}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+        # --- 2. FULL PORTFOLIO TABLE ---
+        st.divider()
+        st.subheader(f"📋 All {market_name} Shares")
         disp = subset[['display_name', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
         disp.columns = ['Asset Name (Ticker)', 'Shares', 'Avg Cost', 'LTP', 'Market Value', 'Net Gain', 'Day Change']
         
@@ -175,6 +184,7 @@ if df is not None and not df.empty:
             'Day Change':"{:.2f}%"
         }).applymap(style_gains, subset=['Net Gain', 'Day Change']), use_container_width=True, hide_index=True)
         
+        # --- 3. SUMMARY STATS ---
         st.table(pd.DataFrame([{
             'Total Invested': f"{cur_sym}{subset['buy_price'].sum():,.2f}",
             'Current Value': f"{cur_sym}{subset['mkt_val'].sum():,.2f}",
@@ -182,20 +192,19 @@ if df is not None and not df.empty:
             'Total Return': f"{(subset['gain_val'].sum()/subset['buy_price'].sum()*100):.2f}%" if subset['buy_price'].sum() != 0 else "0.00%"
         }]))
 
-        # --- NEW SECTION: TOP GAINERS & LOSERS ---
+        # --- 4. TOP GAINERS & LOSERS ---
         st.divider()
         st.subheader(f"🚀 {market_name} Daily Movers")
-        
         col_g, col_l = st.columns(2)
         
         with col_g:
-            st.markdown("**Top 5 Gainers**")
+            st.markdown("**Top 5 Gainers (Day)**")
             gainers = subset.nlargest(5, 'day_pct')[['display_name', 'day_pct']]
             gainers.columns = ['Asset', 'Day Change']
             st.dataframe(gainers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
             
         with col_l:
-            st.markdown("**Top 5 Losers**")
+            st.markdown("**Top 5 Losers (Day)**")
             losers = subset.nsmallest(5, 'day_pct')[['display_name', 'day_pct']]
             losers.columns = ['Asset', 'Day Change']
             st.dataframe(losers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
