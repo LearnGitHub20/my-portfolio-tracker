@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
-import plotly.graph_objects as go
 import os
 from datetime import datetime
 
@@ -14,11 +13,10 @@ st.set_page_config(layout="wide", page_title="Global Wealth Tracker", page_icon=
 # --- SIDEBAR: GLOBAL INDICES ---
 st.sidebar.header("🌍 Market Indices")
 
-@st.cache_data(ttl=3600)  # Cache index data for 1 hour to prevent constant API calls
+@st.cache_data(ttl=3600)  # Refresh every hour
 def fetch_indices():
     indices = {"^NSEI": "Nifty 50", "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^FTSE": "FTSE 100"}
     try:
-        # threads=False is critical for Streamlit Cloud stability
         data = yf.download(list(indices.keys()), period="2d", interval="1d", progress=False, threads=False)['Close']
         results = []
         for ticker, name in indices.items():
@@ -31,15 +29,13 @@ def fetch_indices():
         return []
 
 index_data = fetch_indices()
-
 if index_data:
-    # Display indices in a 2x2 grid in the sidebar
     c1, c2 = st.sidebar.columns(2)
     for i, idx in enumerate(index_data):
         target_col = c1 if i % 2 == 0 else c2
         target_col.metric(idx['name'], f"{idx['price']:,.0f}", f"{idx['change']:+.2f}%")
 else:
-    st.sidebar.warning("Indices currently unavailable")
+    st.sidebar.warning("Indices unavailable")
 
 st.sidebar.divider()
 
@@ -116,7 +112,7 @@ if df is not None and not df.empty:
             tickers = subset['symbol'].tolist()
             fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
             
-            with st.status(f"Fetching {market_name}...", expanded=False):
+            with st.status(f"Fetching {market_name} Prices...", expanded=False):
                 data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
                 def get_p(sym):
                     try:
@@ -129,14 +125,22 @@ if df is not None and not df.empty:
 
             subset['buy_price'] = subset['qty'] * subset['avg_price']
             subset['mkt_val'] = subset['qty'] * subset['ltp']
-            subset['gain_loss_val'] = subset['mkt_val'] - subset['buy_price']
-            subset['gain_loss_pct'] = (subset['gain_loss_val'] / subset['buy_price'] * 100).fillna(0)
-            subset['day_gain_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
+            subset['gain_val'] = subset['mkt_val'] - subset['buy_price']
+            subset['gain_pct'] = (subset['gain_val'] / subset['buy_price'] * 100).fillna(0)
+            subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
             
             cur_sym = str(subset['curr_sym'].iloc[0])
-            st.subheader(f"{market_name} Holdings")
-            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_loss_val', 'gain_loss_pct', 'day_gain_pct']]
-            st.dataframe(disp.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_loss_pct':"{:.2f}%", 'day_gain_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_loss_val', 'day_gain_pct']), use_container_width=True, hide_index=True)
+
+            st.subheader(f"🔝 Top 10 {market_name} Holdings")
+            subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
+            top_10 = subset.nlargest(10, 'alloc_pct')[['symbol', 'mkt_val', 'alloc_pct']]
+            top_10_total = pd.DataFrame([['**TOTAL**', top_10['mkt_val'].sum(), top_10['alloc_pct'].sum()]], columns=['symbol', 'mkt_val', 'alloc_pct'])
+            st.dataframe(pd.concat([top_10, top_10_total]).style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'alloc_pct': "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.subheader("📋 All Shares")
+            disp = subset[['symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'gain_pct', 'day_pct']]
+            st.dataframe(disp.style.format({'mkt_val': f"{cur_sym}{{:,.2f}}", 'gain_pct':"{:.2f}%", 'day_pct':"{:.2f}%"}).applymap(style_gains, subset=['gain_val', 'day_pct']), use_container_width=True, hide_index=True)
             return subset
 
     for i, name in enumerate(["India", "US", "London", "Europe"]):
@@ -146,54 +150,43 @@ if df is not None and not df.empty:
     with tabs[0]:
         st.header(f"Total Portfolio Analysis ({display_curr})")
         
-        # FX Conversion
         try:
             pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR"] if c != display_curr]
             fx = yf.download(pairs, period="1d", progress=False, threads=False)['Close']
             rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR"]}
             rates[display_curr] = 1.0
-        except: rates = {"USD": 1.2, "INR": 105.0, "EUR": 1.1, "GBP": 1.0}
+        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0}
 
         summary_rows = []
         for m_name, m_df in regional_data.items():
             if m_df is not None and not m_df.empty:
-                val_display = m_df['mkt_val'].sum() / rates[m_df['curr_code'].iloc[0]]
-                summary_rows.append({"Market": m_name, f"Value ({display_curr})": val_display})
+                val_conv = m_df['mkt_val'].sum() / rates[m_df['curr_code'].iloc[0]]
+                summary_rows.append({"Market": m_name, f"Value ({display_curr})": val_conv})
         
         if summary_rows:
             sum_df = pd.DataFrame(summary_rows)
             total_val = sum_df[f"Value ({display_curr})"].sum()
             
-            c1, c2 = st.columns([1, 1])
+            c1, c2 = st.columns(2)
             with c1:
                 st.metric("Total Net Worth", f"{curr_icons[display_curr]}{total_val:,.2f}")
-                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4), use_container_width=True)
-            
+                st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4, title="Global Allocation"), use_container_width=True)
             with c2:
-                # Benchmark Comparison
-                st.subheader("Performance vs Benchmark")
-                bench = st.selectbox("Compare with:", ["S&P 500", "Nifty 50"])
-                t_bench = "^GSPC" if bench == "S&P 500" else "^NSEI"
-                
                 if os.path.exists(HIST_FILE):
                     h_df = pd.read_csv(HIST_FILE)
                     h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
                     match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
                     if len(match_h) > 1:
-                        b_data = yf.download(t_bench, start=match_h['Timestamp'].min(), progress=False, threads=False)['Close']
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=match_h['Timestamp'], y=(match_h['Value']/match_h['Value'].iloc[0])*100, name="Portfolio"))
-                        fig.add_trace(go.Scatter(x=b_data.index, y=(b_data/b_data.iloc[0])*100, name=bench, line=dict(dash='dash')))
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value", title=f"Value History ({display_curr})"), use_container_width=True)
             
             save_history(total_val, display_curr)
 
 else:
-    st.info("Please upload your data in the Settings tab.")
+    st.info("Upload your portfolio_db.csv in the Settings tab.")
 
 with tabs[5]:
     st.header("Settings")
     uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
     if uploaded:
         with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
-        st.success("File saved! Refresh to see data.")
+        st.success("File uploaded! Please refresh.")
