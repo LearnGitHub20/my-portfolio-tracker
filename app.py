@@ -176,13 +176,22 @@ if df is not None and not df.empty:
         disp = subset[['display_name', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
         disp.columns = ['Asset Name (Ticker)', 'Shares', 'Avg Cost', 'LTP', 'Market Value', 'Net Gain', 'Day Change']
         
-        st.dataframe(disp.style.format({
+        # VERSION COMPATIBILITY CHECK FOR STYLING
+        st_styled = disp.style.format({
             'Avg Cost':"{:.2f}", 
             'LTP':"{:.2f}", 
             'Market Value': f"{cur_sym}{{:,.2f}}", 
             'Net Gain': f"{cur_sym}{{:,.2f}}", 
             'Day Change':"{:.2f}%"
-        }).applymap(style_gains, subset=['Net Gain', 'Day Change']), use_container_width=True, hide_index=True)
+        })
+        
+        # Fix for AttributeError: 'Styler' object has no attribute 'applymap'
+        if hasattr(st_styled, 'map'):
+            st_styled = st_styled.map(style_gains, subset=['Net Gain', 'Day Change'])
+        else:
+            st_styled = st_styled.applymap(style_gains, subset=['Net Gain', 'Day Change'])
+
+        st.dataframe(st_styled, use_container_width=True, hide_index=True)
         
         # --- 3. SUMMARY STATS ---
         st.table(pd.DataFrame([{
@@ -201,13 +210,19 @@ if df is not None and not df.empty:
             st.markdown("**Top 5 Gainers (Day)**")
             gainers = subset.nlargest(5, 'day_pct')[['display_name', 'day_pct']]
             gainers.columns = ['Asset', 'Day Change']
-            st.dataframe(gainers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
+            g_styled = gainers.style.format({'Day Change': "{:+.2f}%"})
+            if hasattr(g_styled, 'map'): g_styled = g_styled.map(style_gains, subset=['Day Change'])
+            else: g_styled = g_styled.applymap(style_gains, subset=['Day Change'])
+            st.dataframe(g_styled, use_container_width=True, hide_index=True)
             
         with col_l:
             st.markdown("**Top 5 Losers (Day)**")
             losers = subset.nsmallest(5, 'day_pct')[['display_name', 'day_pct']]
             losers.columns = ['Asset', 'Day Change']
-            st.dataframe(losers.style.format({'Day Change': "{:+.2f}%"}).applymap(style_gains, subset=['Day Change']), use_container_width=True, hide_index=True)
+            l_styled = losers.style.format({'Day Change': "{:+.2f}%"})
+            if hasattr(l_styled, 'map'): l_styled = l_styled.map(style_gains, subset=['Day Change'])
+            else: l_styled = l_styled.applymap(style_gains, subset=['Day Change'])
+            st.dataframe(l_styled, use_container_width=True, hide_index=True)
             
         return subset
 
@@ -261,7 +276,7 @@ if df is not None and not df.empty:
                     h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
                     match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
                     if len(match_h) > 1:
-                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value"), use_container_width=True)
+                        st.plotly_chart(px.line(match_h, x=\"Timestamp\", y=\"Value\"), use_container_width=True)
             save_history(total_global, display_curr)
 
     elif active_tab == "🇨🇭 Switzerland": render_market_view("Switzerland")
