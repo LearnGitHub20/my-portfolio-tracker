@@ -276,7 +276,7 @@ if df is not None and not df.empty:
                     h_df['Timestamp'] = pd.to_datetime(h_df['Timestamp'])
                     match_h = h_df[h_df['Currency'] == display_curr].sort_values('Timestamp')
                     if len(match_h) > 1:
-                        st.plotly_chart(px.line(match_h, x=\"Timestamp\", y=\"Value\"), use_container_width=True)
+                        st.plotly_chart(px.line(match_h, x="Timestamp", y="Value"), use_container_width=True)
             save_history(total_global, display_curr)
 
     elif active_tab == "🇨🇭 Switzerland": render_market_view("Switzerland")
