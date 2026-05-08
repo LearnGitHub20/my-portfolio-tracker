@@ -142,7 +142,6 @@ if df is not None and not df.empty:
             for t in fetch_list:
                 try:
                     ticker_obj = yf.Ticker(t)
-                    # Extract only the Company Name
                     official_name = ticker_obj.info.get('longName') or ticker_obj.info.get('shortName') or t
                     name_map[t] = official_name
                 except:
@@ -152,7 +151,10 @@ if df is not None and not df.empty:
                 try:
                     t = sym if ('.' in sym or market_name != "India") else f"{sym}.NS"
                     v = data[t] if len(fetch_list) > 1 else data
-                    return float(v.iloc[-1]), float(v.iloc[-2]), name_map[t]
+                    # Safety check for single vs multi ticker results
+                    p_curr = float(v.iloc[-1]) if hasattr(v, 'iloc') else float(v)
+                    p_prev = float(v.iloc[-2]) if hasattr(v, 'iloc') and len(v) > 1 else p_curr
+                    return p_curr, p_prev, name_map.get(t, sym)
                 except: return 0.0, 0.0, sym
 
             prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
@@ -164,14 +166,12 @@ if df is not None and not df.empty:
         subset['day_pct'] = ((subset['ltp'] - subset['prev']) / subset['prev'] * 100).fillna(0)
         cur_sym = str(subset['curr_sym'].iloc[0])
 
-        # --- 1. TOP 10 ALLOCATION TABLE (with Company Name) ---
         st.subheader(f"🔝 Top 10 {market_name} Holdings")
         subset['alloc_pct'] = (subset['mkt_val'] / subset['mkt_val'].sum() * 100).fillna(0)
         top_10 = subset.nlargest(10, 'alloc_pct')[['company_name', 'symbol', 'mkt_val', 'alloc_pct']]
         top_10.columns = ['Company Name', 'Ticker', 'Market Value', 'Allocation %']
         st.dataframe(top_10.style.format({'Market Value': f"{cur_sym}{{:,.2f}}", 'Allocation %': "{:.2f}%"}), use_container_width=True, hide_index=True)
 
-        # --- 2. FULL PORTFOLIO TABLE (with separate Name and Ticker) ---
         st.divider()
         st.subheader(f"📋 All {market_name} Shares")
         disp = subset[['company_name', 'symbol', 'qty', 'avg_price', 'ltp', 'mkt_val', 'gain_val', 'day_pct']]
@@ -192,7 +192,6 @@ if df is not None and not df.empty:
 
         st.dataframe(st_styled, use_container_width=True, hide_index=True)
         
-        # --- 3. SUMMARY STATS ---
         st.table(pd.DataFrame([{
             'Total Invested': f"{cur_sym}{subset['buy_price'].sum():,.2f}",
             'Current Value': f"{cur_sym}{subset['mkt_val'].sum():,.2f}",
@@ -200,13 +199,5 @@ if df is not None and not df.empty:
             'Total Return': f"{(subset['gain_val'].sum()/subset['buy_price'].sum()*100):.2f}%" if subset['buy_price'].sum() != 0 else "0.00%"
         }]))
 
-        # --- 4. TOP GAINERS & LOSERS ---
         st.divider()
         st.subheader(f"🚀 {market_name} Daily Movers")
-        col_g, col_l = st.columns(2)
-        
-        with col_g:
-            st.markdown("**Top 5 Gainers (Day)**")
-            gainers = subset.nlargest(5, 'day_pct')[['company_name', 'day_pct']]
-            gainers.columns = ['Company', 'Day Change']
-            g_
