@@ -136,29 +136,36 @@ if df is not None and not df.empty:
         fetch_list = [t if ('.' in t or market_name != "India") else f"{t}.NS" for t in tickers]
         
         with st.status(f"Updating {market_name} Data...", expanded=False):
-            data = yf.download(fetch_list, period="2d", progress=False, threads=False)['Close']
-            
-            name_map = {}
-            for t in fetch_list:
+            # Attempt Bulk Download
+            try:
+                raw_data = yf.download(fetch_list, period="2d", progress=False, threads=True)['Close']
+            except:
+                raw_data = pd.DataFrame()
+
+            results = []
+            for original_sym in tickers:
+                t = original_sym if ('.' in original_sym or market_name != "India") else f"{original_sym}.NS"
                 try:
-                    ticker_obj = yf.Ticker(t)
-                    official_name = ticker_obj.info.get('longName') or ticker_obj.info.get('shortName') or t
-                    name_map[t] = official_name
+                    # 1. Get Prices
+                    if not raw_data.empty and t in raw_data.columns:
+                        p_curr = float(raw_data[t].iloc[-1])
+                        p_prev = float(raw_data[t].iloc[-2]) if len(raw_data) > 1 else p_curr
+                    else:
+                        # Individual Fallback
+                        hist = yf.Ticker(t).history(period="2d")
+                        p_curr = float(hist['Close'].iloc[-1])
+                        p_prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else p_curr
+                    
+                    # 2. Get Name
+                    info = yf.Ticker(t).info
+                    name = info.get('longName') or info.get('shortName') or original_sym
+                    
+                    results.append({'symbol': original_sym, 'ltp': p_curr, 'prev': p_prev, 'company_name': name})
                 except:
-                    name_map[t] = t
+                    results.append({'symbol': original_sym, 'ltp': 0.0, 'prev': 0.0, 'company_name': original_sym})
 
-            def get_p(sym):
-                try:
-                    t = sym if ('.' in sym or market_name != "India") else f"{sym}.NS"
-                    v = data[t] if len(fetch_list) > 1 else data
-                    # Safety check for single vs multi ticker results
-                    p_curr = float(v.iloc[-1]) if hasattr(v, 'iloc') else float(v)
-                    p_prev = float(v.iloc[-2]) if hasattr(v, 'iloc') and len(v) > 1 else p_curr
-                    return p_curr, p_prev, name_map.get(t, sym)
-                except: return 0.0, 0.0, sym
-
-            prices = subset['symbol'].apply(lambda x: pd.Series(get_p(x)))
-            subset['ltp'], subset['prev'], subset['company_name'] = prices[0].fillna(0), prices[1].fillna(0), prices[2]
+            price_df = pd.DataFrame(results)
+            subset = subset.merge(price_df, on='symbol', how='left')
 
         subset['buy_price'] = subset['qty'] * subset['avg_price']
         subset['mkt_val'] = subset['qty'] * subset['ltp']
@@ -178,17 +185,12 @@ if df is not None and not df.empty:
         disp.columns = ['Company Name', 'Ticker', 'Shares', 'Avg Cost', 'LTP', 'Market Value', 'Net Gain', 'Day Change']
         
         st_styled = disp.style.format({
-            'Avg Cost':"{:.2f}", 
-            'LTP':"{:.2f}", 
-            'Market Value': f"{cur_sym}{{:,.2f}}", 
-            'Net Gain': f"{cur_sym}{{:,.2f}}", 
-            'Day Change':"{:.2f}%"
+            'Avg Cost':"{:.2f}", 'LTP':"{:.2f}", 
+            'Market Value': f"{cur_sym}{{:,.2f}}", 'Net Gain': f"{cur_sym}{{:,.2f}}", 'Day Change':"{:.2f}%"
         })
         
-        if hasattr(st_styled, 'map'):
-            st_styled = st_styled.map(style_gains, subset=['Net Gain', 'Day Change'])
-        else:
-            st_styled = st_styled.applymap(style_gains, subset=['Net Gain', 'Day Change'])
+        if hasattr(st_styled, 'map'): st_styled = st_styled.map(style_gains, subset=['Net Gain', 'Day Change'])
+        else: st_styled = st_styled.applymap(style_gains, subset=['Net Gain', 'Day Change'])
 
         st.dataframe(st_styled, use_container_width=True, hide_index=True)
         
@@ -201,3 +203,79 @@ if df is not None and not df.empty:
 
         st.divider()
         st.subheader(f"🚀 {market_name} Daily Movers")
+        col_g, col_l = st.columns(2)
+        with col_g:
+            st.markdown("**Top 5 Gainers (Day)**")
+            gainers = subset.nlargest(5, 'day_pct')[['company_name', 'day_pct']]
+            gainers.columns = ['Company', 'Day Change']
+            g_styled = gainers.style.format({'Day Change': "{:+.2f}%"})
+            if hasattr(g_styled, 'map'): g_styled = g_styled.map(style_gains, subset=['Day Change'])
+            else: g_styled = g_styled.applymap(style_gains, subset=['Day Change'])
+            st.dataframe(g_styled, use_container_width=True, hide_index=True)
+        with col_l:
+            st.markdown("**Top 5 Losers (Day)**")
+            losers = subset.nsmallest(5, 'day_pct')[['company_name', 'day_pct']]
+            losers.columns = ['Company', 'Day Change']
+            l_styled = losers.style.format({'Day Change': "{:+.2f}%"})
+            if hasattr(l_styled, 'map'): l_styled = l_styled.map(style_gains, subset=['Day Change'])
+            else: l_styled = l_styled.applymap(style_gains, subset=['Day Change'])
+            st.dataframe(l_styled, use_container_width=True, hide_index=True)
+            
+        return subset
+
+    if active_tab == "📊 Summary":
+        st.header(f"Global Portfolio Summary ({display_curr})")
+        # Quick view logic for Summary
+        regional_results = {}
+        for m in ["India", "US", "London", "Europe", "Switzerland"]:
+            subset_m = filtered_df[filtered_df['market'] == m].copy()
+            if not subset_m.empty:
+                tickers_m = subset_m['symbol'].tolist()
+                fetch_m = [t if ('.' in t or m != "India") else f"{t}.NS" for t in tickers_m]
+                try:
+                    data_m = yf.download(fetch_m, period="1d", progress=False)['Close']
+                    def get_val(s):
+                        t = s if ('.' in s or m != "India") else f"{s}.NS"
+                        try:
+                            v = data_m[t] if len(fetch_m) > 1 else data_m
+                            return float(v.iloc[-1]) if hasattr(v, 'iloc') else float(v)
+                        except: return 0.0
+                    subset_m['mkt_val'] = subset_m['qty'] * subset_m['symbol'].apply(get_val)
+                    regional_results[m] = subset_m
+                except: pass
+
+        try:
+            pairs = [f"{display_curr}{c}=X" for c in ["GBP", "USD", "INR", "EUR", "CHF"] if c != display_curr]
+            fx = yf.download(pairs, period="1d", progress=False)['Close']
+            rates = {c: fx[f"{display_curr}{c}=X"].iloc[-1] if f"{display_curr}{c}=X" in fx else 1.0 for c in ["GBP", "USD", "INR", "EUR", "CHF"]}
+            rates[display_curr] = 1.0
+        except: rates = {"USD": 1.25, "INR": 105.0, "EUR": 1.15, "GBP": 1.0, "CHF": 1.10}
+
+        summary_rows = []
+        for m_name, m_df in regional_results.items():
+            m_curr = m_df['curr_code'].iloc[0]
+            local_val = m_df['mkt_val'].sum()
+            conv_val = local_val / rates[m_curr]
+            summary_rows.append({"Market": m_name, "Currency": m_df['curr_sym'].iloc[0], "Market Value (Local)": local_val, f"Value ({display_curr})": conv_val})
+        
+        if summary_rows:
+            sum_df = pd.DataFrame(summary_rows)
+            total_global = sum_df[f"Value ({display_curr})"].sum()
+            st.metric("Total Portfolio Value", f"{curr_icons[display_curr]}{total_global:,.2f}")
+            st.dataframe(sum_df.style.format({'Market Value (Local)': "{:,.2f}", f"Value ({display_curr})": f"{curr_icons[display_curr]}{{:,.2f}}"}), use_container_width=True, hide_index=True)
+            st.plotly_chart(px.pie(sum_df, values=f"Value ({display_curr})", names='Market', hole=0.4), use_container_width=True)
+            save_history(total_global, display_curr)
+
+    elif active_tab == "🇨🇭 Switzerland": render_market_view("Switzerland")
+    elif active_tab == "🇮🇳 India": render_market_view("India")
+    elif active_tab == "🇺🇸 US": render_market_view("US")
+    elif active_tab == "🇬🇧 London": render_market_view("London")
+    elif active_tab == "🇪🇺 Europe": render_market_view("Europe")
+    elif active_tab == "⚙️ Settings":
+        st.header("⚙️ Settings")
+        uploaded = st.file_uploader("Upload portfolio_db.csv", type='csv')
+        if uploaded:
+            with open(DB_FILE, "wb") as f: f.write(uploaded.getbuffer())
+            st.success("File uploaded! Please refresh.")
+else:
+    st.info("Upload your portfolio_db.csv in the Settings tab to begin.")
